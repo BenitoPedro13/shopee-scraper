@@ -5,12 +5,12 @@ import json
 import random
 import time
 from pathlib import Path
-from typing import Any, Iterable, List, Mapping
+from typing import Any, Iterable, List, Mapping, Optional
 
 from .config import settings
 
 
-def jitter_sleep(min_s: float | None = None, max_s: float | None = None) -> None:
+def jitter_sleep(min_s: Optional[float] = None, max_s: Optional[float] = None) -> None:
     a = min_s if min_s is not None else settings.min_delay
     b = max_s if max_s is not None else settings.max_delay
     time.sleep(random.uniform(a, b))
@@ -44,4 +44,3 @@ def write_csv(rows: Iterable[Mapping[str, Any]], path: Path) -> None:
         writer.writeheader()
         writer.writerows(rows)
     tmp.replace(path)
-

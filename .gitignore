@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# Env & local state
+.env
+storage_state.json
+.user-data/
+
+# Editors
+.DS_Store
+.idea/
+.vscode/
+
+# Data outputs
+data/
+!data/.gitkeep
+
+# Playwright
+playwright-report/
+test-results/
+.pw-browsers/
+

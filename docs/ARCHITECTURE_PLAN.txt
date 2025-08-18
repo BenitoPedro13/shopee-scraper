@@ -1,0 +1,105 @@
+Shopee Scraper — Plano de Arquitetura (2025)
+
+Visão
+- Projeto acadêmico-evolutivo para coletar dados públicos da Shopee com foco em conformidade (sem PII, respeitar robots.txt/ToS), robustez anti-bot e manutenção contínua.
+
+Objetivos
+- Coletar dados públicos (busca, produto, loja, reviews) sob sessão autenticada.
+- Persistir sessão para minimizar OTP/CAPTCHA recorrentes.
+- Reduzir bloqueios com throttling, delays, proxies e perfis isolados.
+- Reprodutibilidade: configuração via .env, CLI única, logs e métricas.
+
+Stack Técnica
+- Python 3.10+; Playwright (Chromium) para conteúdo dinâmico.
+- python-dotenv (configs), pydantic (Settings/Schema), tenacity (retries), loguru (logging), pandas (CSV), rich/typer (CLI UX).
+- Futuro: Kameleo (anti-detect), 2Captcha/Anti-Captcha (CAPTCHA), OnlineSim/Grizzly (OTP), SQLite/Postgres (persistência).
+
+Fase 1 — MVP mínimo (headful, sessão persistida)
+- Login manual via Playwright (headful) e gravação de storage_state.json.
+- Scraping de busca por palavra-chave com extração de cards (título, preço, vendidos, URL).
+- Export JSON/CSV simples em data/.
+- Controles: wait_for_selector, wait_until=networkidle, delays aleatórios, timeouts generosos.
+- CLI: comandos login e search.
+
+Fase 2 — Produto e modelo de dados
+- Página de produto: título, preço, variações, estoque, vendedor, rating, imagens.
+- Schemas Pydantic para validação/normalização.
+- Deduplicação por (shopid, itemid) sempre que disponível.
+- Paginação/scroll controlado em busca/categoria.
+
+Fase 3 — Resiliência e sinais de bloqueio
+- Retries com backoff exponencial (429/5xx) usando tenacity.
+- Detecção de login wall/CAPTCHA/layout vazio → marcar sessão como degradada.
+- Throttling: ~1–2 req/s por perfil, orçamentos por minuto.
+- Health-check de sessão antes de rodar lotes.
+
+Fase 4 — Sessões, perfis e proxies
+- Vários contextos Playwright com storage_state independente por perfil.
+- 1 IP (proxy) por perfil; geolocalização coerente com o domínio (ex.: BR → shopee.com.br).
+- Rotação de IPs controlada (evitar troca durante a sessão).
+- Mapeamento domínio ↔ região/IP.
+
+Fase 5 — CAPTCHA e OTP
+- Integração com 2Captcha/Anti-Captcha (fallback manual).
+- SMS API para registro/autenticação quando necessário.
+- Reuso agressivo de sessões para reduzir custos de OTP/CAPTCHA.
+
+Fase 6 — Escala e orquestração
+- Scheduler/queue (Celery/RQ + Redis ou pipeline simples em Python).
+- Concurrency segura: limites por perfil/conta/IP.
+- Métricas: taxa de sucesso, páginas/hora, bans/hora, latência média, erros transitórios vs fatais.
+- Logs estruturados (JSON) com níveis (info, warn, error).
+
+Fase 7 — Anti-detect (opcional)
+- Kameleo + Playwright: fingerprint realista, timezone/locale alinhados, perfis persistentes.
+- Gestão de perfis via API local; reaproveitamento sem exportar cookies manualmente.
+
+Fase 8 — Persistência e entrega de dados
+- Arquivos: JSON/CSV por lote em data/.
+- Banco: SQLite (local) ou Postgres; upsert por (shopid, itemid).
+- Índices para consultas por categoria/keyword/data.
+
+Fase 9 — Observabilidade e manutenção
+- Painel simples (CLI/Notebook) para métricas e amostras.
+- Alertas de quebra de seletor; smoke tests diários.
+- Rotina de atualização de seletores via config/feature flags.
+
+Fase 10 — Compliance e segurança
+- Sem PII; respeitar robots.txt e ToS.
+- Rate limits conservadores; disjuntores (circuit breakers) ao detectar bloqueios.
+- Segredos em .env; nunca versionar storage_state.json.
+
+Layout de Diretórios
+.
+├── cli.py                  # Comandos login/search/product/export
+├── requirements.txt        # Dependências do Python
+├── .env.example            # Exemplo de variáveis de ambiente
+├── src/
+│   └── shopee_scraper/
+│       ├── __init__.py
+│       ├── config.py       # Settings via .env (domínio, proxy, headless, limites)
+│       ├── session.py      # Criação de contextos; salvar/carregar storage_state
+│       ├── search.py       # Busca, paginação/scroll, extração de cards
+│       └── utils.py        # Delays, export JSON/CSV, utilidades
+├── data/
+│   └── .gitkeep            # Saídas (gitignored)
+└── docs/
+    └── ARCHITECTURE_PLAN.txt
+
+Padrões e Boas Práticas
+- Retries apenas em erros transitórios; parar em login wall/CAPTCHA.
+- Fail-fast em sessões comprometidas; reciclar perfil/IP.
+- Testes rápidos de seletores em amostras pequenas antes de rodadas grandes.
+
+Roadmap Resumido
+1) MVP login + search
+2) Produto + schema
+3) Resiliência (retries/limites)
+4) Perfis + proxies
+5) CAPTCHA/OTP
+6) Escala/queue + métricas
+7) Anti-detect opcional
+8) Banco/exports
+9) Observabilidade
+10) Manutenção contínua
+

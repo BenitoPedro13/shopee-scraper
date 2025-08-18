@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from loguru import logger
 
 from ..utils import ensure_data_dir, write_csv, write_json
+from ..config import settings
 
 
 def _loads_body(body: str, base64_flag: bool) -> Optional[dict]:
@@ -131,6 +132,83 @@ def export_pdp_from_jsonl(jsonl_path: Path) -> Tuple[Path, Path, List[Dict[str, 
 
     data_dir = ensure_data_dir()
     stem = jsonl_path.stem  # e.g., cdp_pdp_12345
+    json_out = data_dir / f"{stem}_export.json"
+    csv_out = data_dir / f"{stem}_export.csv"
+    write_json(rows, json_out)
+    write_csv(rows, csv_out)
+    return json_out, csv_out, rows
+
+
+# ----------------------- SEARCH EXPORT (CDP) -----------------------
+
+def _find_search_items(payload: Any) -> List[dict]:
+    # Try common structures: top-level 'items', nested 'items', or 'data.items'
+    if isinstance(payload, dict):
+        for key in ("items",):
+            v = payload.get(key)
+            if isinstance(v, list):
+                return [x for x in v if isinstance(x, dict)]
+        data = payload.get("data")
+        if isinstance(data, dict):
+            v = data.get("items")
+            if isinstance(v, list):
+                return [x for x in v if isinstance(x, dict)]
+    return []
+
+
+def _normalize_search_item(entry: dict) -> Dict[str, Any]:
+    base = entry.get("item_basic") if isinstance(entry.get("item_basic"), dict) else entry
+    item_id = base.get("itemid") or base.get("item_id")
+    shop_id = base.get("shopid") or base.get("shop_id")
+    title = base.get("name") or base.get("title")
+    currency = base.get("currency")
+    price_min = base.get("price_min") or base.get("price")
+    price_max = base.get("price_max") or base.get("price")
+    sold = base.get("historical_sold") or base.get("sold")
+    shop_location = base.get("shop_location")
+
+    url = None
+    if shop_id and item_id:
+        url = f"https://{settings.shopee_domain}/product/{shop_id}/{item_id}"
+
+    return {
+        "item_id": item_id,
+        "shop_id": shop_id,
+        "title": title,
+        "currency": currency,
+        "price_min": price_min,
+        "price_max": price_max,
+        "sold": sold,
+        "shop_location": shop_location,
+        "url": url,
+    }
+
+
+def export_search_from_jsonl(jsonl_path: Path) -> Tuple[Path, Path, List[Dict[str, Any]]]:
+    rows: List[Dict[str, Any]] = []
+    with jsonl_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception as e:
+                logger.warning(f"Skipping invalid JSONL line: {e}\n{line[:200]}")
+                continue
+            body = rec.get("body")
+            base64_flag = bool(rec.get("base64"))
+            if not isinstance(body, str):
+                continue
+            parsed = _loads_body(body, base64_flag)
+            if not parsed:
+                continue
+            items = _find_search_items(parsed)
+            for it in items:
+                rows.append(_normalize_search_item(it))
+
+    data_dir = ensure_data_dir()
+    stem = jsonl_path.stem  # e.g., cdp_search_12345
     json_out = data_dir / f"{stem}_export.json"
     csv_out = data_dir / f"{stem}_export.csv"
     write_json(rows, json_out)

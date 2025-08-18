@@ -47,20 +47,30 @@ Comandos principais:
 ```bash
 python cli.py --help
 python cli.py login
+python cli.py cdp-login  # login em Chrome real (perfil CDP)
 python cli.py search --keyword "fones bluetooth"
 # Captura via CDP (PDP):
-# A) Lançar Chrome com porta de debug e perfil do USER_DATA_DIR
-python cli.py cdp-pdp "https://shopee.com.br/algum-produto" --launch --timeout 25
-# B) Anexar a um Chrome já aberto com --remote-debugging-port=9222
-# (defina CDP_PORT se usar outra porta)
+# A) Lança Chrome com porta de debug por padrão (USER_DATA_DIR)
 python cli.py cdp-pdp "https://shopee.com.br/algum-produto" --timeout 25
+# B) Para anexar a um Chrome já aberto com --remote-debugging-port=9222, use --no-launch
+python cli.py cdp-pdp "https://shopee.com.br/algum-produto" --no-launch --timeout 25
 # Exportar dados normalizados a partir da captura CDP
 python cli.py cdp-export  # usa o JSONL mais recente
 python cli.py cdp-export data/cdp_pdp_1755508732.jsonl
+
+# Captura via CDP (Busca/Listagem):
+python cli.py cdp-search --keyword "brinquedo para cachorro" --timeout 25  # captura + exporta (lança Chrome por padrão)
+python cli.py cdp-search --keyword "brinquedo para cachorro" --no-launch --no-export  # só captura, anexando a Chrome já aberto
+
+# Enriquecer export de busca com dados reais de PDP (lote):
+python cli.py cdp-enrich-search  --launch  # usa o export mais recente e roda PDP em lote
+python cli.py cdp-enrich-search data/cdp_search_17555_export.json --launch --per-timeout 12 --pause 0.6
 ```
 Notas:
 - `search` serve para descoberta básica; a coleta robusta de dados usa CDP nas PDPs.
+- Para consistência com o CDP, você pode usar `cdp-login` + `cdp-search` e pular o Playwright.
 - Saída CDP: `data/cdp_pdp_<timestamp>.jsonl` (uma linha por resposta capturada com url/status/headers/body).
+  - Para busca: `data/cdp_search_<timestamp>.jsonl` + exports `_export.json`/`_export.csv`.
 
 ## Estrutura
 ```

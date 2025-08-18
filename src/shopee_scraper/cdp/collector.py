@@ -214,3 +214,229 @@ def collect_pdp_once(url: str, launch: bool = False, timeout_s: float = 20.0) ->
         except Exception:
             pass
 
+
+def collect_search_once(keyword: str, launch: bool = False, timeout_s: float = 20.0) -> Path:
+    """Launch/attach to Chrome via CDP, navigate to a search URL, capture listing API responses.
+
+    Returns path to the JSONL file with captured records.
+    """
+    import urllib.parse as _url
+
+    port = int(os.environ.get("CDP_PORT", "9222"))
+    # Default filters for Shopee search/listing APIs; override via CDP_FILTER_PATTERNS
+    default_patterns = [
+        r"/api/v4/search/",
+        r"/api/v2/search_items",
+        r"/api/v4/recommend/",
+    ]
+    env_patterns = os.environ.get("CDP_FILTER_PATTERNS")
+    patterns = [p.strip() for p in env_patterns.split(",") if p.strip()] if env_patterns else default_patterns
+
+    filters = CdpFilters.from_patterns(patterns)
+    proc = start_chrome_if_requested(port, launch)
+    try:
+        collector = CdpCollector(port=port, filters=filters)
+        tab = collector.new_tab()
+
+        q = _url.quote_plus(keyword)
+        search_url = f"https://{settings.shopee_domain}/search?keyword={q}"
+        logger.info(f"Navigating to Search: {search_url}")
+        tab.call_method("Page.navigate", url=search_url)
+
+        t0 = time.time()
+        while time.time() - t0 < timeout_s:
+            time.sleep(0.25)
+
+        data_dir = ensure_data_dir()
+        ts = int(time.time())
+        out_path = data_dir / f"cdp_search_{ts}.jsonl"
+        n = collector.dump_items_jsonl(out_path)
+        logger.info(f"Captured {n} matching responses → {out_path}")
+        return out_path
+    finally:
+        try:
+            if 'tab' in locals():
+                tab.stop()
+        except Exception:
+            pass
+        try:
+            if proc is not None:
+                proc.terminate()
+        except Exception:
+            pass
+
+
+def launch_chrome_for_login(timeout_open_s: Optional[float] = None, port: Optional[int] = None) -> None:
+    """Launch a real Chrome with the project user-data dir and remote debugging enabled.
+
+    Use this to perform manual login in a real browser profile used by CDP capture.
+    Keeps the browser open until the user closes it or the optional timeout elapses.
+    """
+    p = int(os.environ.get("CDP_PORT", str(port or 9222)))
+    proc = start_chrome_if_requested(p, launch=True)
+    logger.info(
+        "Chrome launched with user profile. Log in to Shopee in the opened browser."
+    )
+    if timeout_open_s is None:
+        input("Press Enter here after finishing login to close Chrome...")
+    else:
+        logger.info(f"Keeping Chrome open for ~{timeout_open_s}s")
+        time.sleep(timeout_open_s)
+    try:
+        if proc is not None:
+            proc.terminate()
+    except Exception:
+        pass
+
+
+from typing import Callable, Optional
+
+
+def collect_pdp_batch(
+    urls: List[str],
+    launch: bool = False,
+    timeout_s: float = 12.0,
+    pause_s: float = 0.5,
+    on_progress: Optional[Callable[[str, Dict[str, object]], None]] = None,
+) -> Path:
+    """Capture PDP API responses for multiple product URLs in a single CDP session.
+
+    Returns path to a single JSONL file with all captured records.
+    """
+    if not urls:
+        raise ValueError("No URLs provided for PDP batch capture.")
+
+    port = int(os.environ.get("CDP_PORT", "9222"))
+    default_patterns = [r"/api/v4/pdp/get_pc"]
+    env_patterns = os.environ.get("CDP_FILTER_PATTERNS")
+    patterns = [p.strip() for p in env_patterns.split(",") if p.strip()] if env_patterns else default_patterns
+
+    filters = CdpFilters.from_patterns(patterns)
+    proc = start_chrome_if_requested(port, launch)
+    try:
+        collector = CdpCollector(port=port, filters=filters)
+        tab = collector.new_tab()
+
+        total = len(urls)
+        for idx, u in enumerate(urls, start=1):
+            try:
+                logger.info(f"Navigating PDP: {u}")
+                if on_progress:
+                    on_progress("start", {"index": idx, "total": total, "url": u})
+                tab.call_method("Page.navigate", url=u)
+            except Exception as e:
+                logger.warning(f"Failed to navigate to {u}: {e}")
+                continue
+            t0 = time.time()
+            while time.time() - t0 < timeout_s:
+                time.sleep(0.25)
+            time.sleep(pause_s)
+            if on_progress:
+                on_progress("done", {"index": idx, "total": total, "url": u})
+
+        data_dir = ensure_data_dir()
+        ts = int(time.time())
+        out_path = data_dir / f"cdp_pdp_batch_{ts}.jsonl"
+        n = collector.dump_items_jsonl(out_path)
+        logger.info(f"Captured {n} PDP responses in batch → {out_path}")
+        return out_path
+    finally:
+        try:
+            if 'tab' in locals():
+                tab.stop()
+        except Exception:
+            pass
+
+
+def collect_pdp_batch_concurrent(
+    urls: List[str],
+    *,
+    launch: bool = False,
+    timeout_s: float = 8.0,
+    stagger_s: float = 1.0,
+    concurrency: int = 4,
+    on_progress: Optional[Callable[[str, Dict[str, object]], None]] = None,
+) -> Path:
+    """Capture PDP API responses for multiple product URLs using multiple tabs concurrently.
+
+    Schedules navigation in batches of size `concurrency`, staggering each tab by `stagger_s` seconds,
+    and waiting `timeout_s` after dispatching a batch.
+    """
+    if not urls:
+        raise ValueError("No URLs provided for PDP batch capture.")
+    if concurrency < 1:
+        concurrency = 1
+
+    port = int(os.environ.get("CDP_PORT", "9222"))
+    default_patterns = [r"/api/v4/pdp/get_pc"]
+    env_patterns = os.environ.get("CDP_FILTER_PATTERNS")
+    patterns = [p.strip() for p in env_patterns.split(",") if p.strip()] if env_patterns else default_patterns
+
+    filters = CdpFilters.from_patterns(patterns)
+    proc = start_chrome_if_requested(port, launch)
+    tabs: List = []
+    try:
+        collector = CdpCollector(port=port, filters=filters)
+        # Pre-create tabs up to concurrency
+        for _ in range(concurrency):
+            tabs.append(collector.new_tab())
+
+        # Dispatch in batches
+        total = len(urls)
+        for i in range(0, len(urls), concurrency):
+            batch = urls[i : i + concurrency]
+            logger.info(f"Batch {i//concurrency + 1}: navigating {len(batch)} PDPs")
+            for j, u in enumerate(batch):
+                try:
+                    logger.info(f"→ Tab {j+1}: {u}")
+                    if on_progress:
+                        on_progress(
+                            "start",
+                            {
+                                "index": i + j + 1,
+                                "total": total,
+                                "url": u,
+                                "tab": j + 1,
+                                "batch": (i // concurrency) + 1,
+                            },
+                        )
+                    tabs[j].call_method("Page.navigate", url=u)
+                except Exception as e:
+                    logger.warning(f"Failed to navigate tab {j+1} to {u}: {e}")
+                time.sleep(max(0.0, stagger_s))
+            # dwell to allow API responses to arrive
+            t0 = time.time()
+            while time.time() - t0 < timeout_s:
+                time.sleep(0.25)
+            if on_progress:
+                on_progress(
+                    "batch_done",
+                    {
+                        "end_index": i + len(batch),
+                        "total": total,
+                        "batch": (i // concurrency) + 1,
+                    },
+                )
+
+        data_dir = ensure_data_dir()
+        ts = int(time.time())
+        out_path = data_dir / f"cdp_pdp_batch_{ts}.jsonl"
+        n = collector.dump_items_jsonl(out_path)
+        logger.info(f"Captured {n} PDP responses (concurrent) → {out_path}")
+        return out_path
+    finally:
+        for t in tabs:
+            try:
+                t.stop()
+            except Exception:
+                pass
+        try:
+            if proc is not None:
+                proc.terminate()
+        except Exception:
+            pass
+        try:
+            if proc is not None:
+                proc.terminate()
+        except Exception:
+            pass

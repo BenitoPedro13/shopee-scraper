@@ -6,10 +6,36 @@ from typing import Any, Dict, List
 from urllib.parse import quote_plus
 
 from playwright.sync_api import TimeoutError as PWTimeoutError
+from playwright.sync_api import Page
 
 from .config import settings
-from .session import create_authenticated_context
+from .session import create_search_context
 from .utils import ensure_data_dir, jitter_sleep, write_csv, write_json
+
+
+def _is_captcha_gate(page: Page) -> bool:
+    try:
+        url = page.url or ""
+    except Exception:
+        url = ""
+    if "/verify/captcha" in url:
+        return True
+    try:
+        # Look for common CAPTCHA hints (heuristic, may evolve)
+        has_iframe = page.locator("iframe[src*='captcha'], iframe[src*='challenge']").first.is_visible(timeout=1000)
+        has_turnstile = page.locator("input[name='cf-turnstile-response']").first.is_visible(timeout=1000)
+        has_text = page.get_by_text("verifique se você é humano", exact=False).first.is_visible(timeout=1000)
+        return bool(has_iframe or has_turnstile or has_text)
+    except Exception:
+        return False
+
+
+def _type_like_human(page: Page, selector: str, text: str) -> None:
+    # Focus and type with small random delay per character
+    page.click(selector, delay=100)
+    for ch in text:
+        page.keyboard.type(ch, delay=80)
+    jitter_sleep(0.3, 0.8)
 
 
 def search_products(keyword: str, limit: int = 50) -> List[Dict[str, Any]]:
@@ -20,17 +46,59 @@ def search_products(keyword: str, limit: int = 50) -> List[Dict[str, Any]]:
     - Usamos alguns seletores comuns com fallbacks.
     - Realizamos scroll incremental para carregar mais itens até `limit`.
     """
-    url = f"https://{settings.shopee_domain}/search?keyword={quote_plus(keyword)}"
-    browser, context = create_authenticated_context()
+    browser, context, close_fn = create_search_context()
     page = context.new_page()
 
     results: List[Dict[str, Any]] = []
     try:
-        page.goto(url, wait_until="networkidle")
+        # Humanized navigation: land on homepage, then use the UI search box
+        homepage = f"https://{settings.shopee_domain}/"
+        page.goto(homepage, wait_until="networkidle")
+        jitter_sleep(1.2, 2.4)
+
+        if _is_captcha_gate(page):
+            print("[Search] CAPTCHA detectado após abrir a home. Resolva manualmente na janela." )
+            try:
+                input("Pressione Enter após resolver o CAPTCHA...")
+            except EOFError:
+                pass
+
+        # Try common selectors for the search input
+        input_selectors = [
+            "input[type='search']",
+            "input[name='keyword']",
+            "input.shopee-searchbar-input__input",
+            "input[placeholder*='Buscar']",
+            "input[placeholder*='busca']",
+        ]
+
+        found = False
+        for sel in input_selectors:
+            try:
+                page.wait_for_selector(sel, timeout=5000)
+                _type_like_human(page, sel, keyword)
+                page.keyboard.press("Enter")
+                found = True
+                break
+            except PWTimeoutError:
+                continue
+        if not found:
+            # Fallback: direct URL navigation
+            url = f"https://{settings.shopee_domain}/search?keyword={quote_plus(keyword)}"
+            page.goto(url, wait_until="networkidle")
+
+        jitter_sleep(1.0, 2.0)
+
+        if _is_captcha_gate(page):
+            print("[Search] CAPTCHA detectado na página de busca. Resolva manualmente na janela.")
+            try:
+                input("Pressione Enter após resolver o CAPTCHA...")
+            except EOFError:
+                pass
+
         try:
-            page.wait_for_selector(".shopee-search-item-result__item, [data-sqe='item']", timeout=20000)
+            page.wait_for_selector(".shopee-search-item-result__item, [data-sqe='item']", timeout=25000)
         except PWTimeoutError:
-            # pode ser login wall ou bloqueio
             raise RuntimeError("Não foi possível carregar resultados de busca (login wall/CAPTCHA?).")
 
         def extract() -> List[Dict[str, Any]]:
@@ -73,6 +141,13 @@ def search_products(keyword: str, limit: int = 50) -> List[Dict[str, Any]]:
             page.evaluate("window.scrollBy(0, document.body.scrollHeight);")
             jitter_sleep()
 
+            if _is_captcha_gate(page):
+                print("[Search] CAPTCHA detectado durante o scroll. Resolva manualmente para continuar.")
+                try:
+                    input("Pressione Enter após resolver o CAPTCHA...")
+                except EOFError:
+                    pass
+
         # Trim to limit
         results = results[:limit]
 
@@ -85,8 +160,4 @@ def search_products(keyword: str, limit: int = 50) -> List[Dict[str, Any]]:
         write_csv(results, csv_path)
         return results
     finally:
-        try:
-            context.close()
-        finally:
-            browser.close()
-
+        close_fn()

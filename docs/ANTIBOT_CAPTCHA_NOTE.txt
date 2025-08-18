@@ -1,49 +1,51 @@
 Context
 - Phase: We are in Phase 1 (MVP – headful login + persisted session).
-- Observation: After a successful manual login, navigating to a search page redirects to Shopee’s anti-bot checkpoint: /verify/captcha?anti_bot_tracking_id=.... The CAPTCHA is not solvable automatically in our current MVP.
+- Observation: After login, Shopee often redirects to /verify/captcha and/or shows “Erro de Carregamento”. Using a normal desktop browser manually may work, but automation and even headful Playwright can still be flagged.
 
-Why this happens (likely causes)
-- IP & geo signals: The IP may be flagged (VPN/DC), or not aligned with the regional domain (e.g., non-BR IP on shopee.com.br), or the IP changed between login and search.
-- Fingerprint & profile freshness: Fresh profile without history; GPU/WebGL/Canvas/Audio/RTC/Navigator characteristics and font lists can look atypical; UA/OS/locale/timezone mismatches.
-- Automation heuristics: Immediate deep-link to search, little/no dwell time, zero mouse/typing events, very fast timings; automation markers still detectable even when webdriver is hidden.
-- Session risk: “Just logged in” account hitting search endpoints fast; missing consent cookies or prior browsing context.
+Why this happens (updated understanding)
+- ML‑powered detection: Shopee reportedly uses reinforcement‑learning models that adapt quickly to new bot tactics by correlating behavioral, timing, and fingerprint signals.
+- Dynamic security SDK: A proprietary JS security library runs continuously in-page, generating dynamic cryptographic headers (e.g., af-ac-enc-dat, x-sap-* family, x-csrftoken, x-sz-sdk-version) tied to device fingerprint, timing, and session state.
+- Device fingerprinting: WebGL/Canvas/Audio/RTC, font lists, Accept‑Language/timezone/user‑agent consistency, hardware/JS performance, and plugin surface are profiled to derive a unique device hash.
+- Automation/tooling detection: Framework artifacts and non‑human behavior (perfect timings, no mouse micros, deterministic scrolls) raise risk scores. Even when WebDriver is masked, Playwright/Selenium patterns can still be detectable.
 
-Relation to the Architecture Plan
-- Phase 1 (current): We only implemented headful login + simple search. No anti-bot hardening yet.
-- Phase 3 (resilience): Retries/backoff, detect login wall/CAPTCHA and pause/notify; slower paced navigation; human-like timing.
-- Phase 4 (sessions/proxies): Stable residential/mobile proxies aligned to target region; strict 1 IP per session; avoid mid-session IP change.
-- Phase 5 (CAPTCHA/OTP): Integrate CAPTCHA-solving providers; implement manual fallback flows.
-- Phase 7 (anti-detect): Use anti-detect browser profiles (e.g., Kameleo) for realistic fingerprints, locale/timezone alignment, and persistent profiles.
+Why traditional methods fail
+- Naked HTTP (requests) cannot execute the security SDK JS, so dynamic headers/tokens are missing and requests get blocked immediately.
+- Classic automation (Selenium/Puppeteer/Playwright) may still be fingerprinted due to runtime modifications and behavior signatures.
 
-Immediate mitigation we will try now
-- Use system Chrome instead of the bundled Chromium via Playwright’s channel "chrome" to better align the browser engine with a real user installation.
-  - Set BROWSER_CHANNEL=chrome in .env.
-  - Re-run login and then search using the same session and IP.
+Three viable approaches (prioritized)
+1) Browser Engine Interception (CDP): Drive a real Chrome via Chrome DevTools Protocol, load PDP/search normally, and capture background API calls (e.g., /api/v4/pdp/get_pc) from the Network domain without injecting detectable automation logic.
+2) Native App API Interception: Reverse engineer the official mobile app and intercept its API requests to extract product data server responses.
+3) Mobile Browser Emulation: Use an Android emulator (e.g., Genymotion) with logged‑in Chrome; capture traffic via ADB/system‑level inspection while interacting like a real user.
 
-Other practical mitigations to consider next
-- Behavior humanization (Phase 3):
-  - Keep HEADLESS=false initially, add realistic dwell time on homepage; scroll and click a few elements before searching.
-  - Navigate via the UI: click search box, type the keyword with delays, press Enter instead of directly loading search?keyword=...
-  - Randomized short delays (jitter) between steps.
-- Geo/IP hygiene (Phase 4):
-  - Use a stable country-aligned residential/mobile proxy for the domain (BR for shopee.com.br). One IP per profile/account; avoid rotation mid-session.
-- Headers & locale consistency (Phase 3):
-  - Align Accept-Language with LOCALE; ensure timezone/locale/user-agent are consistent.
-- CAPTCHA handling (Phase 5):
-  - Add solver integration as a fallback when the gate appears.
-- Anti-detect profiles (Phase 7):
-  - Run via anti-detect browser with persistent, “warmed” profiles.
+Immediate direction for this project
+- Adopt CDP interception for data collection while keeping human UX flows. This means launching real Chrome with remote debugging, connecting via CDP, and filtering network events for relevant API responses.
 
-Suggested next steps checklist
-1) Set BROWSER_CHANNEL=chrome and HEADLESS=false in .env.
-2) Re-run login (python cli.py login) and dwell on homepage for ~30–60s before saving the session.
-3) Run a small search (python cli.py search -k "fones bluetooth" -l 10). If redirected to CAPTCHA again, stop.
-4) If the issue persists:
-   - Add behavior humanization (UI navigation + delays).
-   - Switch to a BR residential/mobile proxy and keep it pinned per profile.
-   - Consider CAPTCHA solving integration.
-   - Consider anti-detect browser integration.
+Concrete CDP plan (Approach 1)
+- Launch Chrome with remote debugging: chrome --remote-debugging-port=9222 using a persistent profile aligned to region.
+- Connect via CDP client (e.g., pychrome/pycdp) and enable Network domain (requestWillBeSent, responseReceived, loadingFinished).
+- Navigate to Shopee PDP/search using realistic behavior in the UI.
+- Filter relevant endpoints (e.g., /api/v4/pdp/get_pc and related) and extract response bodies with Network.getResponseBody.
+- Maintain Accept‑Language and timezone alignment; avoid clearing cookies during a run but support strategic cache/cookie clears between sessions.
 
-Note
-- Shopee’s defenses evolve. Selector and flow maintenance will be ongoing, and hardened phases (3–7) should be prioritized if the CAPTCHA gate remains frequent.
+Operational mitigations that still matter
+- Geo/IP hygiene: Use country‑aligned, stable residential/mobile proxies; avoid mid‑session IP changes; one IP per profile.
+- Human behavior: Realistic mouse/move/scroll/typing patterns and dwell times; occasional backward scrolls and pauses.
+- Cookie/3P cookies: Ensure third‑party cookies and consent states aren’t blocked; if needed, launch flags to disable 3P cookie phaseout for CAPTCHA widgets.
+- Session isolation: One Chrome profile per session; recycle instances after N pages to avoid pattern accumulation.
+- Reverse‑engineering loop: Periodically review security JS changes, dynamic header requirements, endpoint variations, and adapt filters.
 
+Revised next steps checklist
+1) Switch target to CDP interception:
+   - Install a CDP client (e.g., pychrome) and add a CDP helper module in this repo.
+   - Start Chrome with --remote-debugging-port=9222 using the same regional profile and proxy.
+2) Keep HEADLESS=false and real Chrome (BROWSER_CHANNEL=chrome or explicit path). Ensure 3P cookies not broken (consider phaseout flag if necessary).
+3) Implement a minimal CDP collector that:
+   - Opens a new tab, enables Network domain, navigates to a PDP, captures /api/v4/pdp/get_pc responses, and writes JSON to data/.
+4) Humanize navigation before opening PDPs: home → category → product; random dwell and scroll.
+5) If CDP approach degrades (blocks increase over time), plan fallbacks:
+   - Native app API interception track.
+   - Android emulator + mobile Chrome + ADB capture track.
+
+Notes on scope & ethics
+- Shopee’s defenses evolve; any working approach may degrade over months due to adaptive ML. Maintain multiple tracks in parallel.
+- Respect ToS/robots, rate‑limit conservatively, avoid PII, and use data responsibly.

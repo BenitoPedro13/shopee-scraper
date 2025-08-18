@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     # Networking
     proxy_url: Optional[str] = Field(None, alias="PROXY_URL")
 
+    # Behavior/hardening
+    use_persistent_context_for_search: bool = Field(
+        True, alias="USE_PERSISTENT_CONTEXT_FOR_SEARCH"
+    )
+    disable_3pc_phaseout: bool = Field(True, alias="DISABLE_3PC_PHASEOUT")
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

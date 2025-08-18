@@ -10,13 +10,14 @@ Objetivos
 - Reprodutibilidade: configuração via .env, CLI única, logs e métricas.
 
 Stack Técnica
-- Python 3.10+; Playwright (Chromium) para conteúdo dinâmico.
+- Python 3.10+; Playwright (para automação básica da UI) e Chrome via CDP para interceptação de rede.
 - python-dotenv (configs), pydantic (Settings/Schema), tenacity (retries), loguru (logging), pandas (CSV), rich/typer (CLI UX).
+- CDP client (pychrome/pycdp) para capturar chamadas de API de forma mais resiliente.
 - Futuro: Kameleo (anti-detect), 2Captcha/Anti-Captcha (CAPTCHA), OnlineSim/Grizzly (OTP), SQLite/Postgres (persistência).
 
 Fase 1 — MVP mínimo (headful, sessão persistida)
 - Login manual via Playwright (headful) e gravação de storage_state.json.
-- Scraping de busca por palavra-chave com extração de cards (título, preço, vendidos, URL).
+- Busca inicial e extração básica de cards (título, preço, vendidos, URL) — consciente de limitações anti-bot.
 - Export JSON/CSV simples em data/.
 - Controles: wait_for_selector, wait_until=networkidle, delays aleatórios, timeouts generosos.
 - CLI: comandos login e search.
@@ -32,12 +33,13 @@ Fase 3 — Resiliência e sinais de bloqueio
 - Detecção de login wall/CAPTCHA/layout vazio → marcar sessão como degradada.
 - Throttling: ~1–2 req/s por perfil, orçamentos por minuto.
 - Health-check de sessão antes de rodar lotes.
+- Comportamento humano (mouse/scroll/typing/dwell) e consistência de locale/timezone/UA.
 
 Fase 4 — Sessões, perfis e proxies
-- Vários contextos Playwright com storage_state independente por perfil.
-- 1 IP (proxy) por perfil; geolocalização coerente com o domínio (ex.: BR → shopee.com.br).
-- Rotação de IPs controlada (evitar troca durante a sessão).
-- Mapeamento domínio ↔ região/IP.
+- Vários perfis isolados (Chrome profile por instância/conta).
+- 1 IP (proxy resid./mobile) por perfil; geolocalização coerente com o domínio (ex.: BR → shopee.com.br).
+- Rotação de IPs controlada (evitar troca durante a sessão; reciclar entre lotes).
+- Mapeamento domínio ↔ região/IP; sticky sessions quando necessário.
 
 Fase 5 — CAPTCHA e OTP
 - Integração com 2Captcha/Anti-Captcha (fallback manual).
@@ -50,21 +52,39 @@ Fase 6 — Escala e orquestração
 - Métricas: taxa de sucesso, páginas/hora, bans/hora, latência média, erros transitórios vs fatais.
 - Logs estruturados (JSON) com níveis (info, warn, error).
 
-Fase 7 — Anti-detect (opcional)
-- Kameleo + Playwright: fingerprint realista, timezone/locale alinhados, perfis persistentes.
+Fase 6 — Interceptação por CDP (abordagem prioritária)
+- Lançar Chrome real com --remote-debugging-port=9222 usando perfil persistente e proxy.
+- Conectar via CDP (pychrome/pycdp); habilitar Network domain; coletar requestWillBeSent/responseReceived/loadingFinished.
+- Filtrar endpoints relevantes (ex.: /api/v4/pdp/get_pc) e obter corpo com Network.getResponseBody.
+- Navegar via UI humana (home → categoria → PDP) e registrar metadados (timing, URL, headers). Evitar injeção de JS detectável.
+- Alinhar Accept-Language/timezone/UA; garantir cookies/3P cookies e consent.
+
+Fase 7 — Escala e orquestração (CDP)
+- Múltiplas instâncias de Chrome isoladas (perfil, proxy, sessão) em paralelo.
+- Reciclar instâncias após N páginas (50–100) para evitar acúmulo de padrões.
+- Scheduler/queue (Celery/RQ) para distribuir URLs entre instâncias/locais.
+- Métricas: taxa de sucesso, bans/hora, latência; logs estruturados.
+
+Fase 8 — Alternativas mobile (fallback estratégico)
+- Interceptação da API do app nativo (reverso de protocolos; extração de endpoints e tokens móveis).
+- Emulador Android (Genymotion) + Chrome mobile logado + captura via ADB (system-level).
+- Escolher e manter pelo menos um trilho mobile em paralelo ao CDP para resiliência de longo prazo.
+
+Fase 9 — Anti-detect (opcional)
+- Kameleo/anti-detect + Chrome/Playwright/CDP: fingerprint realista, timezone/locale alinhados, perfis persistentes.
 - Gestão de perfis via API local; reaproveitamento sem exportar cookies manualmente.
 
-Fase 8 — Persistência e entrega de dados
+Fase 10 — Persistência e entrega de dados
 - Arquivos: JSON/CSV por lote em data/.
 - Banco: SQLite (local) ou Postgres; upsert por (shopid, itemid).
 - Índices para consultas por categoria/keyword/data.
 
-Fase 9 — Observabilidade e manutenção
+Fase 11 — Observabilidade e manutenção
 - Painel simples (CLI/Notebook) para métricas e amostras.
 - Alertas de quebra de seletor; smoke tests diários.
 - Rotina de atualização de seletores via config/feature flags.
 
-Fase 10 — Compliance e segurança
+Fase 12 — Compliance e segurança
 - Sem PII; respeitar robots.txt e ToS.
 - Rate limits conservadores; disjuntores (circuit breakers) ao detectar bloqueios.
 - Segredos em .env; nunca versionar storage_state.json.
@@ -88,18 +108,21 @@ Layout de Diretórios
 
 Padrões e Boas Práticas
 - Retries apenas em erros transitórios; parar em login wall/CAPTCHA.
-- Fail-fast em sessões comprometidas; reciclar perfil/IP.
-- Testes rápidos de seletores em amostras pequenas antes de rodadas grandes.
+- Fail-fast em sessões comprometidas; reciclar perfil/IP e fechar Chrome após N páginas.
+- Testes rápidos de seletores/endpoint filters em amostras pequenas antes de rodadas grandes.
+- Alinhar Accept-Language/locale/timezone/UA; evitar mudanças de IP no meio da sessão.
+- Evitar injeções JS detectáveis; preferir observação passiva via CDP.
 
 Roadmap Resumido
-1) MVP login + search
+1) MVP login + search (baseline)
 2) Produto + schema
-3) Resiliência (retries/limites)
-4) Perfis + proxies
+3) Resiliência (retries/limites + humanização)
+4) Perfis + proxies (resid./mobile)
 5) CAPTCHA/OTP
-6) Escala/queue + métricas
-7) Anti-detect opcional
-8) Banco/exports
-9) Observabilidade
-10) Manutenção contínua
-
+6) CDP interception (coleta a partir de API de PDP)
+7) Escala CDP (multi-Instância, reciclagem)
+8) Trilhos mobile (app API e emulador) em paralelo
+9) Anti-detect (opcional)
+10) Banco/exports
+11) Observabilidade
+12) Manutenção contínua

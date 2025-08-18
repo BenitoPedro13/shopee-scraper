@@ -31,6 +31,8 @@ REQUESTS_PER_MINUTE=60
 MIN_DELAY=1.0
 MAX_DELAY=2.5
 PROXY_URL=
+USE_PERSISTENT_CONTEXT_FOR_SEARCH=true
+DISABLE_3PC_PHASEOUT=true
 ```
 
 ## Uso (MVP)
@@ -39,6 +41,12 @@ Por enquanto apenas a estrutura/CLI básica:
 python cli.py --help
 python cli.py login
 python cli.py search --keyword "fones bluetooth"
+# Captura via CDP (PDP):
+# A) Lançar Chrome com porta de debug e perfil do USER_DATA_DIR
+python cli.py cdp-pdp "https://shopee.com.br/algum-produto" --launch --timeout 25
+# B) Anexar a um Chrome já aberto com --remote-debugging-port=9222
+# (defina CDP_PORT se usar outra porta)
+python cli.py cdp-pdp "https://shopee.com.br/algum-produto" --timeout 25
 ```
 Obs.: As rotinas de login e scraping serão implementadas nas próximas etapas.
 
@@ -70,4 +78,3 @@ Obs.: As rotinas de login e scraping serão implementadas nas próximas etapas.
 - Implementar scraping de busca e export (JSON/CSV).
 - Adicionar resiliência (retries/backoff, throttling, detecção de bloqueios).
 - Evoluir para proxies, múltiplas sessões e anti-detect.
-

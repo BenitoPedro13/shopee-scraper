@@ -1,6 +1,6 @@
 # Shopee Scraper (MVP)
 
-Projeto de estudo para scraping de dados públicos da Shopee com Python + Playwright, evoluindo de um MVP simples até uma solução mais robusta (proxies, múltiplos perfis, CAPTCHA/OTP, anti-detect).
+Projeto de estudo para scraping de dados públicos da Shopee. Além do MVP com Playwright, adotamos a estratégia CDP (Chrome DevTools Protocol) para capturar, de um Chrome real, as respostas de APIs usadas pela página (ex.: PDP), reduzindo detecção por anti-bot.
 
 ## Requisitos
 - Python 3.10+
@@ -33,10 +33,17 @@ MAX_DELAY=2.5
 PROXY_URL=
 USE_PERSISTENT_CONTEXT_FOR_SEARCH=true
 DISABLE_3PC_PHASEOUT=true
+CDP_PORT=9222
+CDP_FILTER_PATTERNS=
 ```
 
-## Uso (MVP)
-Por enquanto apenas a estrutura/CLI básica:
+## Estratégia (CDP)
+- Por que CDP: Shopee usa ML + SDK de segurança com fingerprint dinâmico e headers criptográficos. Em vez de injetar automação detectável, observamos passivamente o tráfego via CDP.
+- Fluxo: descobrir URLs de produto (PDP) → abrir PDP no Chrome com porta de debug → capturar `/api/v4/pdp/get_pc` via CDP → exportar.
+- Sessão real: usar `USER_DATA_DIR` e, se possível, proxy residencial alinhado à região.
+
+## Uso (CLI)
+Comandos principais:
 ```bash
 python cli.py --help
 python cli.py login
@@ -47,8 +54,13 @@ python cli.py cdp-pdp "https://shopee.com.br/algum-produto" --launch --timeout 2
 # B) Anexar a um Chrome já aberto com --remote-debugging-port=9222
 # (defina CDP_PORT se usar outra porta)
 python cli.py cdp-pdp "https://shopee.com.br/algum-produto" --timeout 25
+# Exportar dados normalizados a partir da captura CDP
+python cli.py cdp-export  # usa o JSONL mais recente
+python cli.py cdp-export data/cdp_pdp_1755508732.jsonl
 ```
-Obs.: As rotinas de login e scraping serão implementadas nas próximas etapas.
+Notas:
+- `search` serve para descoberta básica; a coleta robusta de dados usa CDP nas PDPs.
+- Saída CDP: `data/cdp_pdp_<timestamp>.jsonl` (uma linha por resposta capturada com url/status/headers/body).
 
 ## Estrutura
 ```
@@ -62,11 +74,15 @@ Obs.: As rotinas de login e scraping serão implementadas nas próximas etapas.
 │       ├── config.py
 │       ├── session.py
 │       ├── search.py
-│       └── utils.py
+│       ├── utils.py
+│       └── cdp/
+│           ├── __init__.py
+│           └── collector.py
 ├── data/
 │   └── .gitkeep
 └── docs/
-    └── ARCHITECTURE_PLAN.txt
+    ├── ARCHITECTURE_PLAN.txt
+    └── ANTIBOT_CAPTCHA_NOTE.txt
 ```
 
 ## Aviso
@@ -74,7 +90,8 @@ Obs.: As rotinas de login e scraping serão implementadas nas próximas etapas.
 - Evitar PII; usar limites conservadores; manter 1 IP por sessão.
 
 ## Próximos Passos
-- Implementar fluxo de login (headful) e persistência de sessão.
-- Implementar scraping de busca e export (JSON/CSV).
-- Adicionar resiliência (retries/backoff, throttling, detecção de bloqueios).
-- Evoluir para proxies, múltiplas sessões e anti-detect.
+- Exportador PDP: parsear JSONL do CDP para JSON/CSV normalizado.
+- Captura CDP de busca/listagens: extrair PDPs das APIs de listagem.
+- Batch PDP: processar lista de URLs com pacing humano e reciclagem de instâncias.
+- Resiliência: retries/backoff, limites por perfil, detecção/pausa em bloqueios.
+- Proxies/Perfis: 1 IP por perfil (resid./mobile), alinhado à região, sem troca no meio da sessão.

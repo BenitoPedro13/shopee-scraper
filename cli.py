@@ -1,3 +1,4 @@
+import os
 import typer
 from pathlib import Path
 from rich.console import Console
@@ -10,13 +11,18 @@ from src.shopee_scraper.cdp.collector import (
     launch_chrome_for_login,
     collect_pdp_batch,
     collect_pdp_batch_concurrent,
+    collect_search_paged,
 )
 from src.shopee_scraper.cdp.exporter import (
     export_pdp_from_jsonl,
     export_search_from_jsonl,
 )
+from src.shopee_scraper.config import settings
+from src.shopee_scraper.envcheck import validate_environment, suggest_region_for_domain
 
 app = typer.Typer(help="Shopee Scraper CLI (MVP scaffolding)")
+profiles_app = typer.Typer(help="Gerenciar perfis de navegador (CDP)")
+app.add_typer(profiles_app, name="profiles")
 console = Console()
 
 
@@ -85,16 +91,122 @@ def cdp_login(
         console.print(f"[red]Erro[/]: {e}")
 
 
+# ------------------------------ Profiles CLI ------------------------------
+
+def _profiles_base_dir() -> Path:
+    # If settings.user_data_dir already points to .../profiles/<name>, go up to 'profiles'
+    p = Path(settings.user_data_dir)
+    try:
+        parts = list(p.parts)
+        if "profiles" in parts:
+            idx = parts.index("profiles")
+            return Path(*parts[: idx + 1])
+    except Exception:
+        pass
+    return p / "profiles"
+
+
+@profiles_app.command("list")
+def profiles_list():
+    """Lista perfis disponíveis e o perfil ativo (via PROFILE_NAME)."""
+    base = _profiles_base_dir()
+    base.mkdir(parents=True, exist_ok=True)
+    items = sorted([d.name for d in base.iterdir() if d.is_dir()])
+    active = settings.profile_name or "(não definido)"
+    console.print(f"Base de perfis: {base}")
+    console.print(f"Perfil ativo (PROFILE_NAME): {active}")
+    if not items:
+        console.print("Nenhum perfil encontrado. Crie um com: python cli.py profiles create <nome>")
+        return
+    for name in items:
+        marker = "*" if settings.profile_name and name == settings.profile_name else "-"
+        console.print(f" {marker} {name}")
+
+
+@profiles_app.command("create")
+def profiles_create(name: str = typer.Argument(..., help="Nome do perfil a criar")):
+    """Cria o diretório do perfil (.user-data/profiles/<nome>)."""
+    base = _profiles_base_dir()
+    target = base / name
+    target.mkdir(parents=True, exist_ok=True)
+    console.print(f"[green]OK[/]: perfil criado em {target}")
+    console.print("Dica: ative com 'python cli.py profiles use " + name + "'")
+
+
+def _update_env_var(key: str, value: str, env_path: Path) -> None:
+    lines = []
+    found = False
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip() or line.strip().startswith("#"):
+                lines.append(line)
+                continue
+            if line.startswith(f"{key}="):
+                lines.append(f"{key}={value}")
+                found = True
+            else:
+                lines.append(line)
+    if not found:
+        lines.append(f"{key}={value}")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@profiles_app.command("use")
+def profiles_use(name: str = typer.Argument(..., help="Nome do perfil a usar")):
+    """Define PROFILE_NAME no .env para usar o perfil informado (cria se não existir)."""
+    base = _profiles_base_dir()
+    target = base / name
+    target.mkdir(parents=True, exist_ok=True)
+    env_path = Path(".env")
+    _update_env_var("PROFILE_NAME", name, env_path)
+    console.print(f"[green]OK[/]: PROFILE_NAME={name} definido em {env_path}")
+    console.print(f"Diretório do perfil: {target}")
+    console.print("Faça login com: python cli.py cdp-login")
+
+
+@app.command("env-validate")
+def env_validate():
+    """Valida domínio/proxy/perfil/locale/timezone e sugere correções."""
+    issues = validate_environment()
+    if not issues:
+        console.print("[green]OK[/]: Ambiente válido.")
+        return
+    console.print("[yellow]Avisos/Erros de ambiente detectados:")
+    for lvl, msg in issues:
+        if lvl == "error":
+            console.print(f"[red]ERRO[/]: {msg}")
+        else:
+            console.print(f"[yellow]WARN[/]: {msg}")
+    # Sugerir região p/ domínio
+    suggestion = suggest_region_for_domain(settings.shopee_domain)
+    if suggestion:
+        console.print(
+            f"Sugestão: para {settings.shopee_domain}, use LOCALE={suggestion['locale']} e TIMEZONE={suggestion['timezone']}"
+        )
+
+
 @app.command("cdp-search")
 def cdp_search(
     keyword: str = typer.Option(..., "--keyword", "-k", help="Palavra-chave da busca"),
     launch: bool = typer.Option(True, "--launch/--no-launch", help="Lança o Chrome com porta de debug"),
-    timeout: float = typer.Option(20.0, "--timeout", help="Tempo de captura após navegação (s)"),
+    timeout: float = typer.Option(20.0, "--timeout", help="Tempo de captura por página após navegação (s)"),
+    pages: int = typer.Option(1, "--pages", "-p", help="Quantidade de páginas a capturar (via parâmetro page)"),
+    start_page: int = typer.Option(0, "--start-page", help="Página inicial (0 = primeira)"),
     auto_export: bool = typer.Option(True, "--export/--no-export", help="Exporta JSON/CSV após capturar"),
 ):
     """Captura APIs de busca via CDP e (opcional) exporta resultados normalizados."""
     try:
-        jsonl = collect_search_once(keyword=keyword, launch=launch, timeout_s=timeout)
+        if pages and pages > 1:
+            jsonl = collect_search_paged(
+                keyword=keyword,
+                pages=pages,
+                start_page=start_page,
+                launch=launch,
+                timeout_s=timeout,
+                pause_s=0.5,
+            )
+        else:
+            jsonl = collect_search_once(keyword=keyword, launch=launch, timeout_s=timeout)
         console.print(f"[green]OK[/]: respostas capturadas em {jsonl}")
         if auto_export:
             json_out, csv_out, rows = export_search_from_jsonl(jsonl)

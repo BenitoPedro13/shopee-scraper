@@ -75,6 +75,7 @@ python cli.py cdp-search --keyword "brinquedo para cachorro" --timeout 25  # cap
 python cli.py cdp-search --keyword "brinquedo para cachorro" --no-launch --no-export  # só captura, anexando a Chrome já aberto
 python cli.py cdp-search --keyword "brinquedo para cachorro" -p 5 --timeout 12  # paginação: 5 páginas (page=0..4)
 python cli.py cdp-search --keyword "brinquedo para cachorro" -p 3 --start-page 2  # começa da página 2 (2..4)
+python cli.py cdp-search --keyword "brinquedo para cachorro" --all-pages --timeout 10  # paginar até o fim (com limite de segurança)
 
 # Enriquecer export de busca com dados reais de PDP (lote):
 python cli.py cdp-enrich-search  --launch  # usa o export mais recente e roda PDP em lote
@@ -101,6 +102,11 @@ Notas:
 - Backoff: re-tentativas exponenciais com jitter para `Page.navigate`, `Network.getResponseBody` e enable de domínios CDP.
 - Cooldown: pausa aleatória entre sessões quando há reciclagem por `PAGES_PER_SESSION`.
 - Logs JSON: eventos e métricas mínimas gravados em `data/logs/events.jsonl` (inclui counters como navegações, matches, bloqueios e duração por execução).
+
+## Busca paginada (valor e limites)
+- Valor: maior cobertura (long-tail), menos viés da 1ª página e mais URLs de PDP para enriquecer.
+- Modos: `-p/--pages` para N páginas; `--all-pages` percorre até não aparecerem novas respostas por um curto número de páginas seguidas (com `--max-pages` de segurança).
+- Limites: risco maior de bloqueio — use rate limiting, disjuntor e perfis/proxies coerentes com a região; prefira rodadas curtas com reciclagem.
 
 ## Estrutura
 ```
@@ -130,10 +136,10 @@ Notas:
 - Evitar PII; usar limites conservadores; manter 1 IP por sessão.
 
 ## Próximos Passos
-- Logs JSON + métricas básicas (sucesso/bloqueio/latência) por perfil/IP.
-- Schemas Pydantic + dedup global `(shop_id,item_id)` nas exports.
-- Paginação/scroll em CDP de busca para agregar múltiplas páginas.
-- CLI de perfis: `profiles create/list/use` (qualidade de vida).
+- Scroll em busca (CDP): cobrir UX que carrega mais itens sem alterar `page` (infinite scroll) e agregar respostas antes do export.
+- Métricas estruturadas: agregações/painel simples sobre `data/logs/events.jsonl` (taxa de sucesso, latência, bloqueios por perfil/IP).
+- Mapeamento domínio↔região/IP: checagens fortes para coerência de geo/idioma/timezone antes de lotes.
+- Coerência de fingerprint: revisar UA/headers/timezone/CDP e consent.
 
 ## Testes
 - Rodar testes:

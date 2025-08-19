@@ -36,20 +36,26 @@ Este documento acompanha o progresso do projeto com prioridade máxima em proteg
 - Paginação CDP de busca: captura janela atual; sem rolagem/múltiplas páginas agregadas.
 - Concorrência: abas concorrentes implementadas; sem scheduler/queue/métricas estruturadas.
 
-### Pendente (prioridade entre colchetes)
-- [Alta] Proxy por perfil no CDP: (parcial) falta tratar credenciais via extensão quando necessário e sessão sticky no username.
-- [Alta] Múltiplos perfis isolados: (parcial) adicionar comandos de CLI para criar/listar/alternar perfis.
-- [Alta] Health-check & circuit breaker: (parcial) ampliar para detectar URL de CAPTCHA/login wall e estados intermediários.
-- [Alta] Rate limiting & backoff: limites por minuto/perfil, `tenacity` em 429/5xx, cooldown progressivo (parcial: rate limiting implementado; falta backoff/tenacity).
-- [Alta] Reciclagem após N páginas: fechar e relançar Chrome/perfil; reabrir com mesmo IP (parcial: reciclagem implementada em CDP quando `--launch`).
-- [Média] Schemas Pydantic (`SearchItem`, `PdpItem`) + dedup `(shop_id,item_id)` nas exports.
-- [Média] Logs estruturados (JSON) + métricas: taxa de sucesso, bans/hora, latência, erros tran. vs. fatais.
-- [Média] Paginação/scroll em CDP Busca: agregar múltiplas respostas antes de exportar.
-- [Média] Mapeamento domínio↔região/IP; verificação de coerência Accept-Language/timezone.
-- [Baixa] Persistência em banco (SQLite/Postgres) com upsert.
-- [Baixa] Integração CAPTCHA (2Captcha/Anti‑Captcha) e OTP (SMS API) com fallback manual.
-- [Baixa] Scheduler/queue (Celery/RQ) e orquestração multi-instância.
-- [Baixa] Trilho mobile (app nativo/emulador) e anti‑detect (Kameleo).
+### Backlog Priorizado (necessidade → menor; em cada nível: menor esforço → maior)
+
+Nível 1 — Essenciais (Alta necessidade)
+- Health-check ampliado (impacto: alto, esforço: baixo): detectar URLs/DOM de CAPTCHA/login wall em CDP; parar lote e marcar degradado.
+- Backoff com `tenacity` (impacto: alto, esforço: baixo): retries exponenciais para attach/tab/navigate/getResponseBody e 429/5xx.
+- Cooldown entre chunks (impacto: médio, esforço: baixo): pequena pausa ao reciclar sessões CDP para reduzir desconexões.
+- Logs estruturados + contadores mínimos (impacto: alto, esforço: médio): JSON logging + métricas simples (sucesso, capturas, falhas, tempo).
+
+Nível 2 — Importantes (Média necessidade)
+- CLI de perfis (impacto: médio, esforço: baixo): comandos `profiles create/list/use` e validações de ambiente.
+- Paginação/scroll em CDP Busca (impacto: médio, esforço: médio): agregar múltiplas páginas antes do export.
+- Schemas Pydantic + dedup (impacto: médio, esforço: médio): `SearchItem`/`PdpItem` e deduplicação global `(shop_id,item_id)`.
+- Mapeamento domínio↔região/IP (impacto: médio, esforço: baixo): validação de coerência de geo/idioma/timezone antes de rodadas.
+- Proxy sticky avançado (impacto: médio, esforço: médio‑alto): suporte a extensão de autenticação/allowlist e session tag no username.
+
+Nível 3 — Oportunidade (Baixa necessidade)
+- Persistência em banco (impacto: médio, esforço: médio‑alto): SQLite/Postgres com upsert.
+- CAPTCHA/OTP providers (impacto: médio, esforço: alto): 2Captcha/Anti‑Captcha e SMS API como fallback.
+- Scheduler/queue (impacto: alto p/ escala, esforço: alto): Celery/RQ + limites por perfil/IP.
+- Trilho mobile/anti‑detect (impacto: alto p/ resiliência, esforço: muito alto): app nativo/emulador e Kameleo.
 
 ## Mapa por Fase (Plano de Arquitetura)
 - Fase 1 (MVP): concluída.

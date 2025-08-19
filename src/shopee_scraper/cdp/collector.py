@@ -12,6 +12,13 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional
 
 from loguru import logger
+from tenacity import (
+    Retrying,
+    stop_after_attempt,
+    wait_exponential,
+    wait_random,
+    retry_if_exception_type,
+)
 
 try:
     import pychrome  # type: ignore
@@ -20,6 +27,7 @@ except Exception:  # pragma: no cover
 
 from ..config import settings
 from ..utils import ensure_data_dir, mark_session_status, current_profile_name, RateLimiter
+from ..logs import log_event, configure_json_logging
 
 
 def _default_chrome() -> Optional[str]:
@@ -137,6 +145,17 @@ class CdpCollector:
         self.browser = pychrome.Browser(url=f"http://127.0.0.1:{port}")
         self.filters = filters
         self._items: Dict[str, CapturedItem] = {}
+        # Signals for health-check/circuit breaker
+        self._last_any_network_ts: float = time.time()
+        self._last_match_ts: float = 0.0
+        self._blocked_by_status: bool = False
+        self._blocked_url_hit: Optional[str] = None
+        # Minimal counters for metrics
+        self._counters: Dict[str, int] = {
+            "navigate_attempts": 0,
+            "responses_matched": 0,
+            "blocked_status_hits": 0,
+        }
 
     def new_tab(self):
         tab = self.browser.new_tab()
@@ -145,6 +164,7 @@ class CdpCollector:
             req = kwargs.get("request", {})
             url = req.get("url", "")
             request_id = kwargs.get("requestId")
+            self._last_any_network_ts = time.time()
             if request_id and self.filters.match(url):
                 self._items[request_id] = CapturedItem(
                     request_id=request_id,
@@ -152,33 +172,84 @@ class CdpCollector:
                     status=None,
                     headers={},
                 )
+                # We consider a match signal as soon as we see a filtered request
+                self._last_match_ts = time.time()
+                self._counters["responses_matched"] += 1
 
         def on_response_received(**kwargs):
             request_id = kwargs.get("requestId")
             response = kwargs.get("response", {})
+            self._last_any_network_ts = time.time()
             if request_id in self._items:
                 self._items[request_id].status = response.get("status")
                 # normalize headers to str:str
                 hdrs = response.get("headers", {})
                 self._items[request_id].headers = {str(k): str(v) for k, v in hdrs.items()}
+                # Block signals on throttling/forbidden
+                try:
+                    st = int(response.get("status") or 0)
+                    if st in (403, 429):
+                        self._blocked_by_status = True
+                        self._counters["blocked_status_hits"] += 1
+                except Exception:
+                    pass
 
         def on_loading_finished(**kwargs):
             request_id = kwargs.get("requestId")
             if request_id in self._items:
                 try:
-                    body_resp = tab.call_method("Network.getResponseBody", requestId=request_id)
+                    # Backoff for transient errors while fetching body
+                    for attempt in Retrying(
+                        stop=stop_after_attempt(3),
+                        wait=wait_exponential(multiplier=0.5, min=0.5, max=4) + wait_random(0, 0.5),
+                        retry=retry_if_exception_type(Exception),
+                        reraise=True,
+                    ):
+                        with attempt:
+                            body_resp = tab.call_method("Network.getResponseBody", requestId=request_id)
                     self._items[request_id].body = body_resp.get("body")
                     self._items[request_id].base64_encoded = bool(body_resp.get("base64Encoded"))
+                    self._last_match_ts = time.time()
                 except Exception as e:  # pragma: no cover
                     logger.warning(f"Failed to get body for {request_id}: {e}")
+
+        # Detect navigation to block pages (captcha/login)
+        def on_frame_navigated(**kwargs):
+            try:
+                frame = kwargs.get("frame", {})
+                url = frame.get("url", "")
+                if url:
+                    self._last_any_network_ts = time.time()
+                    patterns = [
+                        r"/verify/captcha",
+                        r"/portal/verification",
+                        r"/account/login",
+                        r"captcha",
+                        r"/user/login",
+                    ]
+                    for p in patterns:
+                        if re.search(p, url):
+                            self._blocked_url_hit = url
+                            break
+            except Exception:
+                pass
 
         tab.set_listener("Network.requestWillBeSent", on_request_will_be_sent)
         tab.set_listener("Network.responseReceived", on_response_received)
         tab.set_listener("Network.loadingFinished", on_loading_finished)
+        tab.set_listener("Page.frameNavigated", on_frame_navigated)
 
         tab.start()
-        tab.call_method("Network.enable")
-        tab.call_method("Page.enable")
+        # Enable domains with basic backoff for transient attach errors
+        for attempt in Retrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=0.5, min=0.5, max=4) + wait_random(0, 0.5),
+            retry=retry_if_exception_type(Exception),
+            reraise=True,
+        ):
+            with attempt:
+                tab.call_method("Network.enable")
+                tab.call_method("Page.enable")
         # Align headers/timezone
         try:
             al = _accept_language_header(settings.locale)
@@ -190,6 +261,22 @@ class CdpCollector:
         except Exception:
             pass
         return tab
+
+    # --------------- Health-check & circuit breaker helpers ---------------
+    def should_trip_circuit(self, *, inactivity_s: float = 10.0) -> Optional[str]:
+        now = time.time()
+        # If explicit block indicators seen
+        if self._blocked_by_status:
+            return "blocked_http_status_403_429"
+        if self._blocked_url_hit:
+            return f"blocked_url_detected:{self._blocked_url_hit}"
+        # If no network activity for prolonged time
+        if (now - self._last_any_network_ts) > inactivity_s:
+            return "network_inactivity_timeout"
+        # If no matches (filtered) for prolonged time after some activity
+        if self._last_match_ts == 0.0 and (now - self._last_any_network_ts) > inactivity_s:
+            return "no_filtered_matches_timeout"
+        return None
 
     def dump_items_jsonl(self, path: Path) -> int:
         count = 0
@@ -243,16 +330,40 @@ def collect_pdp_once(url: str, launch: bool = False, timeout_s: float = 20.0) ->
     filters = CdpFilters.from_patterns(patterns)
     proc = start_chrome_if_requested(port, launch)
     try:
+        configure_json_logging()
         collector = CdpCollector(port=port, filters=filters)
         tab = collector.new_tab()
 
         logger.info(f"Navigating to PDP: {url}")
-        tab.call_method("Page.navigate", url=url)
+        # Navigate with backoff
+        for attempt in Retrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=0.5, min=0.5, max=4) + wait_random(0, 0.5),
+            retry=retry_if_exception_type(Exception),
+            reraise=True,
+        ):
+            with attempt:
+                tab.call_method("Page.navigate", url=url)
+                collector._counters["navigate_attempts"] += 1
 
         # Simple dwell until timeout
-        t0 = time.time()
+        session_t0 = time.time()
+        t0 = session_t0
         while time.time() - t0 < timeout_s:
             time.sleep(0.25)
+            if (time.time() - t0) > 3.0:
+                reason = collector.should_trip_circuit(inactivity_s=6.0)
+                if reason:
+                    log_event("circuit_trip", context="pdp_once", reason=reason)
+                    try:
+                        mark_session_status(
+                            profile=current_profile_name(),
+                            status="degraded",
+                            reason=reason,
+                        )
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"Circuit breaker tripped (PDP): {reason}")
 
         # Persist results
         data_dir = ensure_data_dir()
@@ -260,6 +371,14 @@ def collect_pdp_once(url: str, launch: bool = False, timeout_s: float = 20.0) ->
         out_path = data_dir / f"cdp_pdp_{ts}.jsonl"
         n = collector.dump_items_jsonl(out_path)
         logger.info(f"Captured {n} matching responses → {out_path}")
+        log_event(
+            "cdp_capture_summary",
+            context="pdp_once",
+            captured=n,
+            duration_s=round(time.time() - session_t0, 3),
+            counters=collector._counters,
+            output=str(out_path),
+        )
         if n <= 0:
             try:
                 mark_session_status(
@@ -304,23 +423,53 @@ def collect_search_once(keyword: str, launch: bool = False, timeout_s: float = 2
     filters = CdpFilters.from_patterns(patterns)
     proc = start_chrome_if_requested(port, launch)
     try:
+        configure_json_logging()
         collector = CdpCollector(port=port, filters=filters)
         tab = collector.new_tab()
 
         q = _url.quote_plus(keyword)
         search_url = f"https://{settings.shopee_domain}/search?keyword={q}"
         logger.info(f"Navigating to Search: {search_url}")
-        tab.call_method("Page.navigate", url=search_url)
+        for attempt in Retrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=0.5, min=0.5, max=4) + wait_random(0, 0.5),
+            retry=retry_if_exception_type(Exception),
+            reraise=True,
+        ):
+            with attempt:
+                tab.call_method("Page.navigate", url=search_url)
 
-        t0 = time.time()
+        session_t0 = time.time()
+        t0 = session_t0
         while time.time() - t0 < timeout_s:
             time.sleep(0.25)
+            if (time.time() - t0) > 3.0:
+                reason = collector.should_trip_circuit(inactivity_s=6.0)
+                if reason:
+                    log_event("circuit_trip", context="search_once", reason=reason)
+                    try:
+                        mark_session_status(
+                            profile=current_profile_name(),
+                            status="degraded",
+                            reason=reason,
+                        )
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"Circuit breaker tripped (Search): {reason}")
 
         data_dir = ensure_data_dir()
         ts = int(time.time())
         out_path = data_dir / f"cdp_search_{ts}.jsonl"
         n = collector.dump_items_jsonl(out_path)
         logger.info(f"Captured {n} matching responses → {out_path}")
+        log_event(
+            "cdp_capture_summary",
+            context="search_once",
+            captured=n,
+            duration_s=round(time.time() - session_t0, 3),
+            counters=collector._counters,
+            output=str(out_path),
+        )
         if n <= 0:
             try:
                 mark_session_status(
@@ -397,22 +546,46 @@ def collect_pdp_batch(
         limiter = RateLimiter(settings.requests_per_minute)
         proc = start_chrome_if_requested(port, launch)
         try:
+            configure_json_logging()
             collector = CdpCollector(port=port, filters=filters)
             tab = collector.new_tab()
             total = len(sub)
+            session_t0 = time.time()
             for i, u in enumerate(sub, start=1):
                 try:
                     limiter.acquire()
                     logger.info(f"Navigating PDP: {u}")
                     if on_progress:
                         on_progress("start", {"index": i, "total": total, "url": u})
-                    tab.call_method("Page.navigate", url=u)
+                    # Navigate with backoff
+                    for attempt in Retrying(
+                        stop=stop_after_attempt(3),
+                        wait=wait_exponential(multiplier=0.5, min=0.5, max=4) + wait_random(0, 0.5),
+                        retry=retry_if_exception_type(Exception),
+                        reraise=True,
+                    ):
+                        with attempt:
+                            tab.call_method("Page.navigate", url=u)
+                            collector._counters["navigate_attempts"] += 1
                 except Exception as e:
                     logger.warning(f"Failed to navigate to {u}: {e}")
                     continue
                 t0 = time.time()
                 while time.time() - t0 < timeout_s:
                     time.sleep(0.25)
+                    if (time.time() - t0) > 3.0:
+                        reason = collector.should_trip_circuit(inactivity_s=6.0)
+                        if reason:
+                            log_event("circuit_trip", context="pdp_batch", reason=reason, index=i)
+                            try:
+                                mark_session_status(
+                                    profile=current_profile_name(),
+                                    status="degraded",
+                                    reason=reason,
+                                )
+                            except Exception:
+                                pass
+                            raise RuntimeError(f"Circuit breaker tripped (PDP batch): {reason}")
                 time.sleep(max(0.0, pause_s))
                 if on_progress:
                     on_progress("done", {"index": i, "total": total, "url": u})
@@ -421,6 +594,14 @@ def collect_pdp_batch(
             out_path = data_dir / f"cdp_pdp_batch_{ts}.jsonl"
             n = collector.dump_items_jsonl(out_path)
             logger.info(f"Captured {n} PDP responses in batch → {out_path}")
+            log_event(
+                "cdp_capture_summary",
+                context="pdp_batch",
+                captured=n,
+                duration_s=round(time.time() - session_t0, 3),
+                counters=collector._counters,
+                output=str(out_path),
+            )
             if n <= 0:
                 try:
                     mark_session_status(
@@ -451,6 +632,10 @@ def collect_pdp_batch(
         for i in range(0, len(urls), pages_per_session):
             sub = urls[i : i + pages_per_session]
             chunk_paths.append(_run_once(sub))
+            # Cooldown between Chrome sessions to reduce reconnection patterns
+            if i + pages_per_session < len(urls):
+                from ..utils import jitter_sleep
+                jitter_sleep(2.0, 5.0)
         # Concatenate JSONL files
         data_dir = ensure_data_dir()
         ts = int(time.time())
@@ -494,10 +679,12 @@ def collect_pdp_batch_concurrent(
         proc = start_chrome_if_requested(port, launch)
         tabs: List = []
         try:
+            configure_json_logging()
             collector = CdpCollector(port=port, filters=filters)
             for _ in range(min(concurrency, len(chunk_urls))):
                 tabs.append(collector.new_tab())
             total = len(chunk_urls)
+            session_t0 = time.time()
             for i in range(0, len(chunk_urls), len(tabs)):
                 batch = chunk_urls[i : i + len(tabs)]
                 logger.info(f"Chunk {chunk_index}/{total_chunks} → dispatch {len(batch)}")
@@ -516,13 +703,39 @@ def collect_pdp_batch_concurrent(
                                     "batch": (i // len(tabs)) + 1,
                                 },
                             )
-                        tabs[j].call_method("Page.navigate", url=u)
+                        for attempt in Retrying(
+                            stop=stop_after_attempt(3),
+                            wait=wait_exponential(multiplier=0.5, min=0.5, max=4) + wait_random(0, 0.5),
+                            retry=retry_if_exception_type(Exception),
+                            reraise=True,
+                        ):
+                            with attempt:
+                                tabs[j].call_method("Page.navigate", url=u)
+                                collector._counters["navigate_attempts"] += 1
                     except Exception as e:
                         logger.warning(f"Failed to navigate tab {j+1} to {u}: {e}")
                     time.sleep(max(0.0, stagger_s))
                 t0 = time.time()
                 while time.time() - t0 < timeout_s:
                     time.sleep(0.25)
+                    if (time.time() - t0) > 3.0:
+                        reason = collector.should_trip_circuit(inactivity_s=6.0)
+                        if reason:
+                            log_event(
+                                "circuit_trip",
+                                context="pdp_batch_concurrent",
+                                reason=reason,
+                                chunk_index=chunk_index,
+                            )
+                            try:
+                                mark_session_status(
+                                    profile=current_profile_name(),
+                                    status="degraded",
+                                    reason=reason,
+                                )
+                            except Exception:
+                                pass
+                            raise RuntimeError(f"Circuit breaker tripped (PDP concurrent): {reason}")
                 if on_progress:
                     on_progress(
                         "batch_done",
@@ -536,6 +749,14 @@ def collect_pdp_batch_concurrent(
             out_path = data_dir / f"cdp_pdp_batch_{ts}.jsonl"
             n = collector.dump_items_jsonl(out_path)
             logger.info(f"Captured {n} PDP responses (concurrent) → {out_path}")
+            log_event(
+                "cdp_capture_summary",
+                context="pdp_batch_concurrent",
+                captured=n,
+                duration_s=round(time.time() - session_t0, 3),
+                counters=collector._counters,
+                output=str(out_path),
+            )
             if n <= 0:
                 try:
                     mark_session_status(
@@ -566,6 +787,10 @@ def collect_pdp_batch_concurrent(
         for cidx, start in enumerate(range(0, len(urls), pages_per_session), start=1):
             chunk = urls[start : start + pages_per_session]
             chunk_paths.append(_run_chunk(chunk, cidx, total_chunks))
+            # Cooldown between Chrome sessions
+            if start + pages_per_session < len(urls):
+                from ..utils import jitter_sleep
+                jitter_sleep(2.0, 5.0)
         data_dir = ensure_data_dir()
         ts = int(time.time())
         final_out = data_dir / f"cdp_pdp_batch_{ts}.jsonl"

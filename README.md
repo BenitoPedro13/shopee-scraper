@@ -1,32 +1,32 @@
 # Shopee Scraper (MVP)
 
-Projeto de estudo para scraping de dados públicos da Shopee. Além do MVP com Playwright, adotamos a estratégia CDP (Chrome DevTools Protocol) para capturar, de um Chrome real, as respostas de APIs usadas pela página (ex.: PDP), reduzindo detecção por anti-bot.
+Study project for scraping public data from Shopee. Beyond a Playwright MVP, this project prioritizes a CDP (Chrome DevTools Protocol) strategy to capture, from a real Chrome, the API responses used by the page (e.g., PDP), reducing anti‑bot detection.
 
-## Requisitos
+## Requirements
 - Python 3.10+
 - macOS/Linux/Windows
 
-## Instalação
+## Installation
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install --upgrade pip
 pip install -r requirements.txt
-# Instalar navegador (Chromium) do Playwright dentro do workspace
+# Install the Playwright browser (Chromium) inside the workspace
 PLAYWRIGHT_BROWSERS_PATH=.pw-browsers \
   .venv/bin/python -m playwright install chromium
 ```
 
-## Configuração
-Crie um `.env` baseado em `.env.example`:
+## Configuration
+Create a `.env` from `.env.example`:
 ```env
 SHOPEE_DOMAIN=shopee.com.br
 HEADLESS=false
 STORAGE_STATE=storage_state.json
 USER_DATA_DIR=.user-data
 DATA_DIR=data
-# Dê um nome de perfil para isolar contas (opcional)
-PROFILE_NAME=conta_br_01
+# Optional: profile name to isolate accounts
+PROFILE_NAME=br_account_01
 LOCALE=pt-BR
 TIMEZONE=America/Sao_Paulo
 REQUESTS_PER_MINUTE=60
@@ -39,98 +39,105 @@ CDP_PORT=9222
 CDP_FILTER_PATTERNS=
 ```
 
-## Estratégia (CDP)
-- Por que CDP: Shopee usa ML + SDK de segurança com fingerprint dinâmico e headers criptográficos. Em vez de injetar automação detectável, observamos passivamente o tráfego via CDP.
-- Fluxo: descobrir URLs de produto (PDP) → abrir PDP no Chrome com porta de debug → capturar `/api/v4/pdp/get_pc` via CDP → exportar.
-- Sessão real: usar `USER_DATA_DIR` e, se possível, proxy residencial alinhado à região.
-  - Em CDP, se `PROXY_URL` estiver definido, o Chrome é lançado com `--proxy-server=...`.
-  - Dica: muitos provedores chamam o endpoint de "HTTPS proxy"; no Chrome a flag usa `http://host:port` (mapeamos automaticamente `https://` → `http://`).
-  - Observação: credenciais embutidas (`user:pass@host:port`) são removidas da flag; o Chrome solicitará usuário/senha via prompt (ou use allowlist de IP no provedor).
-  - Coerência: o CDP alinha `Accept-Language` e `timezone` com as configs do `.env`.
-  - Use `PROFILE_NAME` para isolar diretórios por conta: `.user-data/profiles/<PROFILE_NAME>`.
-  - Exports: normalização e validação com Schemas Pydantic; deduplicação global por `(shop_id,item_id)` nas exports de PDP e Busca.
+## Approach (CDP)
+- Why CDP: Shopee uses ML + a security SDK with dynamic fingerprinting and cryptographic headers. Instead of detectable automation, we passively observe traffic via CDP.
+- Flow: discover product URLs (PDP) → open PDP in Chrome with remote debugging → capture `/api/v4/pdp/get_pc` via CDP → export.
+- Real session: use `USER_DATA_DIR` and, ideally, a residential proxy aligned to the region.
+  - If `PROXY_URL` is set, Chrome launches with `--proxy-server=...`.
+  - Many providers label endpoints “HTTPS proxy”; Chrome flag expects `http://host:port` (we map `https://` → `http://`).
+  - Credentials in the URL (`user:pass@host:port`) are stripped from the flag; Chrome will prompt (or use provider IP allow‑listing).
+  - CDP aligns `Accept-Language` and `timezone` to `.env` settings.
+  - Use `PROFILE_NAME` to isolate directories per account: `.user-data/profiles/<PROFILE_NAME>`.
+  - Exports: Pydantic normalization; global dedup by `(shop_id,item_id)` across PDP and Search exports.
 
-## Uso (CLI)
-Comandos principais:
+## Quickstart (CLI)
 ```bash
-python cli.py --help
-python cli.py env-validate             # valida perfil/proxy/domínio/locale/timezone
-python cli.py profiles list            # lista perfis disponíveis e o ativo
-python cli.py profiles create br_01    # cria diretório do perfil
-python cli.py profiles use br_01       # define PROFILE_NAME no .env
-python cli.py metrics summary          # resumo de métricas a partir de data/logs/events.jsonl
-python cli.py metrics summary --hours 24 --profile br_01  # janela/filters
-python cli.py metrics export           # exporta CSV/JSON de agregações para gráficos/notebooks
-python cli.py queue add-search -k "batman" -p 5  # agenda uma busca paginada
-python cli.py queue add-enrich --concurrency 6 --per-timeout 12  # agenda um enriquecimento
-python cli.py queue list               # lista tarefas na fila
-python cli.py queue run --max-tasks 5  # executa algumas tarefas pendentes
+# Validate environment (domain/locale/timezone/proxy/profile)
+python cli.py env-validate
+
+# Profiles (isolate sessions and proxies per account)
+python cli.py profiles list
+python cli.py profiles create br_01
+python cli.py profiles use br_01
+
+# Headful login (Playwright) or real Chrome login (CDP profile)
 python cli.py login
-python cli.py cdp-login  # login em Chrome real (perfil CDP)
-python cli.py search --keyword "fones bluetooth"
-# Captura via CDP (PDP):
-# A) Lança Chrome com porta de debug por padrão (USER_DATA_DIR)
-python cli.py cdp-pdp "https://shopee.com.br/algum-produto" --timeout 25
-# B) Para anexar a um Chrome já aberto com --remote-debugging-port=9222, use --no-launch
-python cli.py cdp-pdp "https://shopee.com.br/algum-produto" --no-launch --timeout 25
-# Exportar dados normalizados a partir da captura CDP
-python cli.py cdp-export  # usa o JSONL mais recente
+python cli.py cdp-login
+
+# Discovery (Playwright baseline)
+python cli.py search --keyword "bluetooth headphones"
+
+# CDP Product (PDP) capture
+python cli.py cdp-pdp "https://shopee.com.br/some-product" --timeout 25
+python cli.py cdp-pdp "https://shopee.com.br/some-product" --no-launch --timeout 25  # attach to existing Chrome
+# Export normalized PDP data from latest JSONL
+python cli.py cdp-export
 python cli.py cdp-export data/cdp_pdp_1755508732.jsonl
 
-# Captura via CDP (Busca/Listagem):
-python cli.py cdp-search --keyword "brinquedo para cachorro" --timeout 25  # captura + exporta (lança Chrome por padrão)
-python cli.py cdp-search --keyword "brinquedo para cachorro" --no-launch --no-export  # só captura, anexando a Chrome já aberto
-python cli.py cdp-search --keyword "brinquedo para cachorro" -p 5 --timeout 12  # paginação: 5 páginas (page=0..4)
-python cli.py cdp-search --keyword "brinquedo para cachorro" -p 3 --start-page 2  # começa da página 2 (2..4)
-python cli.py cdp-search --keyword "brinquedo para cachorro" --all-pages --timeout 10  # paginar até o fim (com limite de segurança)
-python cli.py cdp-search -k "batman" --soft-circuit --circuit-inactivity 12  # ignora abort imediato e amplia janela de inatividade
+# CDP Search/List capture
+python cli.py cdp-search --keyword "dog toy" --timeout 25  # capture + export
+python cli.py cdp-search --keyword "dog toy" --no-launch --no-export  # capture only
+python cli.py cdp-search --keyword "dog toy" -p 5 --timeout 12  # pages: 0..4
+python cli.py cdp-search --keyword "dog toy" -p 3 --start-page 2  # start from page 2
+python cli.py cdp-search --keyword "dog toy" --all-pages --timeout 10  # until no new responses (with safety limit)
+python cli.py cdp-search -k "batman" --soft-circuit --circuit-inactivity 12  # softer circuit breaker
 
-# Enriquecer export de busca com dados reais de PDP (lote):
-python cli.py cdp-enrich-search  --launch  # usa o export mais recente e roda PDP em lote
-# Dica (proxies com prompt de login):
-# 1) Abra uma sessão única autenticada no proxy: python cli.py cdp-login
-# 2) Rode os lotes anexando à mesma instância: python cli.py cdp-enrich-search --no-launch
+# Enrich search export with real PDP data (batch)
+python cli.py cdp-enrich-search --launch
+# Tip (proxies with auth prompt):
+# 1) Start one authenticated session via: python cli.py cdp-login
+# 2) Run batches attached to the same instance: --no-launch
 python cli.py cdp-enrich-search data/cdp_search_17555_export.json --launch --per-timeout 12 --pause 0.6
-python cli.py cdp-enrich-search --soft-circuit --circuit-inactivity 12  # modo mais tolerante a inatividade/bloqueio
+python cli.py cdp-enrich-search --soft-circuit --circuit-inactivity 12
+
+# Metrics & Queue
+python cli.py metrics summary
+python cli.py metrics summary --hours 24 --profile br_01
+python cli.py metrics export
+python cli.py queue add-search -k "batman" -p 5
+python cli.py queue add-enrich --concurrency 6 --per-timeout 12
+python cli.py queue list
+python cli.py queue run --max-tasks 5
 ```
-Notas:
-- `search` serve para descoberta básica; a coleta robusta de dados usa CDP nas PDPs.
-- Para consistência com o CDP, você pode usar `cdp-login` + `cdp-search` e pular o Playwright.
-- Saída CDP: `data/cdp_pdp_<timestamp>.jsonl` (uma linha por resposta capturada com url/status/headers/body).
-  - Para busca: `data/cdp_search_<timestamp>.jsonl` + exports `_export.json`/`_export.csv`.
-  - Health-check & disjuntor: se sinais de bloqueio ocorrerem, o perfil é marcado como degradado em `data/session_status/<perfil>.json` e o comando falha. Sinais:
-    - Navegação para páginas de verificação/login (ex.: `/verify/captcha`, `/account/login`, "captcha").
-    - Respostas 403/429 nas APIs filtradas.
-    - Inatividade de rede prolongada sem respostas relevantes.
-  - Rate limiting: navegações via CDP são limitadas por `REQUESTS_PER_MINUTE`.
-  - Reciclagem: se `PAGES_PER_SESSION` > 0 e `--launch` estiver ativo, lotes longos são divididos em sessões menores (Chrome relançado entre chunks) e os JSONLs são concatenados. Há um cooldown aleatório curto (2–5s) entre sessões para reduzir padrões de reconexão.
-  - Perfis: use `python cli.py profiles use <nome>` para fixar `PROFILE_NAME` no `.env` e isolar cookies/cache por conta. Valide o ambiente com `python cli.py env-validate`.
 
-## Proteções recentes (CDP)
-- Disjuntor: aborta cedo ao detectar CAPTCHA/login/inatividade/403-429 e marca sessão como degradada.
-- Backoff: re-tentativas exponenciais com jitter para `Page.navigate`, `Network.getResponseBody` e enable de domínios CDP.
-- Cooldown: pausa aleatória entre sessões quando há reciclagem por `PAGES_PER_SESSION`.
-- Logs JSON: eventos e métricas mínimas gravados em `data/logs/events.jsonl` (inclui counters como navegações, matches, bloqueios e duração por execução).
+Notes
+- `search` is for basic discovery; robust data collection uses CDP on PDPs.
+- For consistency, you can use `cdp-login` + `cdp-search` and skip Playwright completely.
+- CDP output: `data/cdp_pdp_<timestamp>.jsonl` (one line per captured response with url/status/headers/body).
+  - For search: `data/cdp_search_<timestamp>.jsonl` + exports `_export.json`/`_export.csv`.
+  - Health & circuit breaker: on block signals, the profile is marked degraded at `data/session_status/<profile>.json` and the command fails. Signals include:
+    - Navigation to verification/login pages (e.g., `/verify/captcha`, `/account/login`, contains `captcha`).
+    - 403/429 responses on filtered APIs.
+    - Prolonged network inactivity without relevant responses.
+  - Rate limiting: CDP navigations are limited by `REQUESTS_PER_MINUTE`.
+  - Recycling: if `PAGES_PER_SESSION` > 0 and `--launch` is active, long batches are split into smaller sessions (Chrome relaunched between chunks) and JSONLs are concatenated. A short random cooldown (2–5s) reduces reconnection patterns.
+  - Profiles: use `python cli.py profiles use <name>` to set `PROFILE_NAME` and isolate cookies/cache per account. Validate env via `python cli.py env-validate`.
 
-## Tuning de Concorrência & Disjuntor
-- Concorrência máxima: limite pelo CLI (`--concurrency`) e por env `CDP_MAX_CONCURRENCY` (padrão 12 via `.env`).
-- Tempo por aba: ajuste `--per-timeout` (PDP batch) ou `--timeout` (Busca/CDP).
-- Stagger: use `--stagger` (ex.: 0.8–1.0s) para reduzir bursts.
-- Disjuntor: por padrão aborta em bloqueios/inatividade; pode ser suavizado por env:
-  - `CDP_INACTIVITY_S` (padrão 8.0) — janela de inatividade antes de sinalizar bloqueio.
-  - `CDP_CIRCUIT_ENABLED` (true/false) — desliga abort imediato (soft mode; apenas loga e segue).
+## Recent Protections (CDP)
+- Circuit breaker: early abort on CAPTCHA/login/inactivity/403‑429; marks session as degraded.
+- Backoff: exponential retries with jitter for `Page.navigate`, `Network.getResponseBody`, and CDP domain enable.
+- Cooldown: random pause between sessions when recycling via `PAGES_PER_SESSION`.
+- JSON logs: minimal events/metrics written to `data/logs/events.jsonl` (includes counters like navigations, matches, blocks, and duration per run).
 
-## Métricas estruturadas
-- Relatórios: `python cli.py metrics summary [--hours N] [--profile X] [--proxy URL]`.
-- Métricas: taxa de sucesso por execução, média de duração, bloqueios (razões) e contadores (navegações, páginas), por perfil/proxy e geral.
-- Export: `python cli.py metrics export` gera `data/metrics/summary.csv` e `summary.json`. Veja `docs/metrics_example.ipynb` para gráficos rápidos (pandas/matplotlib).
+## Concurrency & Circuit Tuning
+- Max concurrency: limit via CLI (`--concurrency`) and env `CDP_MAX_CONCURRENCY` (default 12).
+- Per‑tab time: adjust `--per-timeout` (PDP batch) or `--timeout` (Search/CDP).
+- Stagger: use `--stagger` (e.g., 0.8–1.0s) to reduce bursts.
+- Circuit: by default aborts on blocks/inactivity; can be softened via env:
+  - `CDP_INACTIVITY_S` (default 8.0) — inactivity window before signaling a block.
+  - `CDP_CIRCUIT_ENABLED` (true/false) — disable immediate abort (soft mode; log and continue).
 
-## Busca paginada (valor e limites)
-- Valor: maior cobertura (long-tail), menos viés da 1ª página e mais URLs de PDP para enriquecer.
-- Modos: `-p/--pages` para N páginas; `--all-pages` percorre até não aparecerem novas respostas por um curto número de páginas seguidas (com `--max-pages` de segurança).
-- Limites: risco maior de bloqueio — use rate limiting, disjuntor e perfis/proxies coerentes com a região; prefira rodadas curtas com reciclagem.
+## Structured Metrics
+- Reports: `python cli.py metrics summary [--hours N] [--profile X] [--proxy URL]`.
+- Metrics: success rate per run, average duration, blocks (reasons) and counters (navigations, pages), by profile/proxy and overall.
+- Export: `python cli.py metrics export` produces `data/metrics/summary.csv` and `summary.json`. See `docs/metrics_example.ipynb` for quick charts (pandas/matplotlib).
 
-## Estrutura
+## Paged Search (value and limits)
+- Value: broader coverage (long‑tail), less first‑page bias, more PDP URLs to enrich.
+- Modes: `-p/--pages` for N pages; `--all-pages` runs until no new responses appear for a few consecutive pages (with `--max-pages` safety).
+- Limits: higher block risk — use rate limiting and the circuit breaker; keep profiles/proxies coherent with the region; prefer short rounds with recycling.
+
+## Project Layout
 ```
 .
 ├── cli.py
@@ -149,25 +156,30 @@ Notas:
 ├── data/
 │   └── .gitkeep
 └── docs/
-    ├── ARCHITECTURE_PLAN.txt
-    └── ANTIBOT_CAPTCHA_NOTE.txt
+    ├── ARCHITECTURE_PLAN.md
+    ├── ANTIBOT_CAPTCHA_NOTE.md
+    ├── REQUIREMENTS_STATUS.md
+    ├── SCALING_ROADMAP.md
+    ├── MULTISITE_ADAPTERS.md
+    ├── PRODUCT_HANDBOOK.md
+    └── BACKLOG.md
 ```
 
-## Aviso
-- Coletar somente dados públicos; respeitar robots.txt e ToS.
-- Evitar PII; usar limites conservadores; manter 1 IP por sessão.
+## Safety & Compliance
+- Collect only public data; respect robots.txt and ToS.
+- Avoid PII; use conservative limits; keep one IP per session/profile.
 
-## Documentação Unificada
-- Handbook do produto: `docs/PRODUCT_HANDBOOK.md` (visão, estado atual, metas, roadmap, operações)
-- Backlog estruturado: `docs/BACKLOG.md` (milestones, tarefas, prioridade, complexidade, tags)
-- Arquitetura: `docs/ARCHITECTURE_PLAN.txt` (com adendo 2025‑08)
-- Requisitos & Status: `docs/REQUIREMENTS_STATUS.md` (com adendo de escala 2025‑08)
-- Roteiro de Escala: `docs/SCALING_ROADMAP.md`
-- Multi‑site (design): `docs/MULTISITE_ADAPTERS.md`
+## Unified Documentation
+- Product handbook: `docs/PRODUCT_HANDBOOK.md` (vision, current state, goals, roadmap, operations)
+- Structured backlog: `docs/BACKLOG.md` (milestones, tasks, priority, complexity, tags)
+- Architecture: `docs/ARCHITECTURE_PLAN.md` (with 2025‑08 addendum)
+- Requirements & status: `docs/REQUIREMENTS_STATUS.md` (with scaling addendum)
+- Scaling roadmap: `docs/SCALING_ROADMAP.md`
+- Multi‑site design: `docs/MULTISITE_ADAPTERS.md`
+ - Operations guide: `docs/operations.md` (runbooks and day‑2 operations)
 
-## Testes
-- Rodar testes:
+## Tests
 ```bash
 pytest -q
 ```
-- Escopo inicial dos testes: utilitários de IO (JSON/CSV) e exportadores CDP (normalização de PDP e Busca). Testes evitam abrir navegador.
+- Initial test scope: IO utilities (JSON/CSV) and CDP exporters (PDP/Search normalization). Tests avoid opening a browser.

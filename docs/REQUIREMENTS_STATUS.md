@@ -1,232 +1,199 @@
-# Shopee Scraper — Requisitos & Status (foco: proteção de contas)
+# Shopee Scraper — Requirements & Status (account protection and safe scale)
 
-Última atualização: 2025-08-19
+Last update: 2025‑08‑19 (scaling addendum)
 
-Este documento acompanha o progresso do projeto com prioridade máxima em proteger contas durante o desenvolvimento (minimizar bans e degradação de sessão).
+This document tracks the project with top priority on protecting accounts and scaling safely (without sacrificing profile/IP hygiene and session reputation).
 
 ---
-ADENDO DE ESCALA (2025-08) — Estado atual, limitadores e como escalar
+SCALING ADDENDUM (2025‑08) — Current state, limiters, and how to scale
 
-Estado Atual (síntese)
-- CDP estável para PDP e Busca, com filtros padrão e export normalizado (JSON/CSV), dedup por `(shop_id,item_id)`.
-- Concurrency via abas com reciclagem por `PAGES_PER_SESSION` e cooldown aleatório curto.
-- Disjuntor (captcha/login/inatividade/403–429) + backoff (tenacity) reduzem danos e marcam sessão como degradada.
-- Fila local baseada em arquivos funciona bem em 1 host, porém não coordena recursos entre múltiplos processos/hosts.
+Current State (summary)
+- Stable CDP for PDP and Search with default filters and normalized export (JSON/CSV), dedup by `(shop_id,item_id)`.
+- Tab concurrency with recycling by `PAGES_PER_SESSION` and short random cooldown.
+- Circuit breaker (captcha/login/inactivity/403–429) + backoff (tenacity) reduce damage and mark session as degraded.
+- Local file‑based queue works well on one host; does not coordinate resources across multiple processes/hosts.
 
-Limitadores Atuais (por que seu setup atual não escala)
-- Único IP/perfil e um único host: throughput limitado e maior risco de detecção.
-- Sem rate limiting global e locks: ao adicionar workers, estoura orçamento por IP e perfis podem ser usados em paralelo por engano.
-- Porta CDP única (fixa): impede múltiplas instâncias de Chrome no mesmo host sem colisões.
-- Persistência somente em arquivos: dificulta dedup cross-workers e consultas/entrega em tempo real.
+Current Limiters (why it doesn’t scale yet)
+- Single IP/profile and one host: limited throughput and higher detection risk.
+- No global rate limiting and locks: adding workers would blow the IP budget and could share a profile accidentally.
+- Single CDP port (fixed): prevents multiple Chrome instances on the same host without collisions.
+- File‑only persistence: hinders cross‑worker dedup and real‑time queries/delivery.
 
-Prioridade Atual — Proteger Contas e Escalar com Segurança
-- Distribuir tarefas entre múltiplos perfis/IPs (sticky), com limites por perfil e por proxy.
-- Eliminar colisões de porta/perfil ao rodar vários Chromes no mesmo host.
-- Garantir idempotência em reprocessos (upsert por `(shop_id,item_id)`), sem duplicidade.
+Current Priority — Protect Accounts and Scale Safely
+- Distribute work across multiple sticky profiles/IPs with per‑profile/per‑proxy limits.
+- Eliminate port/profile collisions when running multiple Chromes on the same host.
+- Ensure idempotency in reprocessing (upsert by `(shop_id,item_id)`), no duplicates.
 
-Backlog Priorizado — Itens novos p/ escala (complementares ao que já consta abaixo)
-- Registro de perfis & proxies (`profiles.yaml`) com `profile_name`, `proxy_url`, `locale`, `timezone`, `rps_limit`, `cdp_port_range`.
-- Alocador de porta CDP (`CDP_PORT_RANGE`) + lock por `user-data-dir` para impedir corrida de perfis.
-- Fila distribuída (Redis + RQ/Celery) e comando `worker` com roteamento por perfil/região.
-- Rate limiting global por `profile_name` e `proxy_url` (token bucket Redis) + locks distribuídos.
-- Persistência em SQLite/Postgres com upsert por `(shop_id,item_id)` e índices; exporters gravam também no DB.
-- Logs centralizados + métricas por perfil/proxy (sucesso, duração, bans/hora) e painel simples.
-- Containerização (Chrome estável + deps) com entrypoints `worker`/`queue` e parametrização por perfil.
+New Backlog Items for Scale (complementary to the list below)
+- Profiles & proxies registry (`profiles.yaml`) with `profile_name`, `proxy_url`, `locale`, `timezone`, `rps_limit`, `cdp_port_range`.
+- CDP port allocator (`CDP_PORT_RANGE`) + lock per `user-data-dir` to prevent profile races.
+- Distributed queue (Redis + RQ/Celery) and `worker` command with routing by profile/region.
+- Global rate limiting per `profile_name` and `proxy_url` (Redis token bucket) + distributed locks.
+- SQLite/Postgres with upsert by `(shop_id,item_id)` and indexes; exporters also write into DB.
+- Centralized logs + metrics by profile/proxy (success, duration, bans/hour) and simple dashboard.
+- Containerization (stable Chrome + deps) with `worker`/`queue` entrypoints and profile‑based parametrization.
 
-Como Atingir (guia de implementação)
+How to Achieve (implementation guide)
 1) Profiles & Proxies
-   - Criar `docs/profiles.example.yaml` e `data/profiles.yaml` (gitignored) com parâmetros por perfil.
-   - `src/shopee_scraper/profiles.py`: loader + validação; CLI para listar/validar.
+   - Create `docs/profiles.example.yaml` and `data/profiles.yaml` (gitignored) with per‑profile parameters.
+   - `src/shopee_scraper/profiles.py`: loader + validation; CLI to list/validate.
 2) Chrome/CDP
-   - `CDP_PORT_RANGE=9300-9400` no `.env`; alocar porta livre por worker.
-   - Lockfile por `user-data-dir` para impedir uso simultâneo do mesmo perfil.
-3) Empacote
-   - Dockerfile com Chrome estável e fonts; entrypoints `cli.py worker`, `cli.py queue`.
-4) Fila + Workers
-   - Adotar Redis e RQ/Celery; adaptar `scheduler.py` mantendo fallback local.
-   - `cli.py workers start --profiles br_01 br_02` para spawn local.
+   - `CDP_PORT_RANGE=9300-9400` in `.env`; allocate a free port per worker.
+   - Lockfile per `user-data-dir` to prevent concurrent use of the same profile.
+3) Packaging
+   - Dockerfile with stable Chrome and fonts; entrypoints `cli.py worker`, `cli.py queue`.
+4) Queue + Workers
+   - Adopt Redis and RQ/Celery; adapt `scheduler.py` keeping local fallback.
+   - `cli.py workers start --profiles br_01 br_02` for local spawn.
 5) Rate limiting & Locks
-   - `limits.py` com token bucket Redis e `with_profile_lock(profile)`; usar em todos os caminhos CDP.
-6) Persistência
-   - `db.py` (SQLite primeiro) e `exporter` salvando também no DB (upsert por `(shop_id,item_id)`).
+   - `limits.py` with Redis token bucket and `with_profile_lock(profile)`; used in all CDP paths.
+6) Persistence
+   - `db.py` (SQLite first) and exporters also saving into DB (upsert by `(shop_id,item_id)`).
 
-Métricas de Sucesso
-- 2+ workers por host, 2+ hosts, sem violar RPS por perfil/IP; sem colisão de porta/perfil.
-- Reprocessos não criam duplicatas no DB; exports consistentes.
-- `metrics summary/export` refletem execuções distribuídas por perfil/proxy.
+Success Metrics
+- 2+ workers per host, 2+ hosts, without violating RPS per profile/IP; no port/profile collisions.
+- Reprocessing does not create duplicates in DB; exports consistent.
+- `metrics summary/export` reflect distributed executions by profile/proxy.
 
-## Prioridade Atual — Proteger Contas
-- Perfil por conta: um `user-data-dir` exclusivo por conta/sessão. Nunca reutilize perfis entre contas.
-- 1 IP por perfil: proxy residencial/móvel estável e geolocalizado. Evite trocar IP no meio da sessão (sticky session).
-- Navegador real + CDP: observar tráfego (Network.*) sem injeção JS. Manter 3P cookies, consent, Accept-Language/timezone coerentes.
-- Comportamento humano: home → busca/categoria → PDP; dwell/scroll natural e timings aleatórios.
-- Limites conservadores: ~1–2 req/s; orçamentos por minuto e pausas. Pare ao sinal de bloqueio.
-- Health-check & disjuntor: detectar login wall/CAPTCHA/layout vazio; marcar sessão “degradada” e interromper.
-- Reciclagem: reiniciar Chrome/perfil após N páginas para reduzir padrões acumulados.
+## Current Priority — Protect Accounts
+- One `user-data-dir` per account/session; never reuse across accounts.
+- One IP per profile: stable, geolocated residential/mobile proxy. Avoid mid‑session IP changes (sticky session).
+- Real browser + CDP: observe traffic (Network.*) without JS injection. Keep 3P cookies, consent, Accept‑Language/timezone coherent.
+- Human behavior: home → search/category → PDP; natural dwell/scroll and random timings.
+- Conservative limits: ~1–2 req/s; minute budgets and pauses. Stop on block signals.
+- Health‑check & circuit breaker: detect login wall/CAPTCHA/empty layout; mark session “degraded” and stop.
+- Recycling: restart Chrome/profile after N pages to reduce accumulated patterns.
 
-## Visão Rápida (Feito vs. Falta)
+## Snapshot (Done vs Missing)
 
-### Concluído
-- Login manual headful com sessão persistida (`storage_state.json`).
-- Busca Playwright (scroll básico), extração de cards e export JSON/CSV.
-- CDP PDP: captura via `Network.getResponseBody` e export normalizado (JSON/CSV).
-- CDP Busca: captura de APIs de listagem e export normalizado (JSON/CSV).
-- Enriquecimento: pipeline Busca → PDP (serial e concorrente por abas).
-- Config `.env`, locale/timezone, flag para 3P cookies; diretórios e gitignore.
-- CDP + Proxy por perfil (básico): `--proxy-server` respeita `PROXY_URL`.
-- Perfis isolados (básico): suporte a `PROFILE_NAME` → `.user-data/profiles/<PROFILE_NAME>`.
-- Health-check mínimo (CDP): se 0 respostas capturadas, marca perfil como degradado em `data/session_status/<perfil>.json` e aborta.
-- Rate limiting básico (CDP): limite por minuto em navegações.
-- Reciclagem por N páginas (CDP): divisão de lotes em sessões quando `--launch`.
-- Coerência de headers/timezone (CDP): `Accept-Language` e `timezone` alinhados.
-- Health-check ampliado + disjuntor (CDP): detecção de CAPTCHA/login/inatividade/403-429 e abort early.
-- Backoff com `tenacity` nos pontos críticos do CDP (navigate/enable/getResponseBody).
-- Cooldown entre chunks ao reciclar sessões CDP.
-- Logs estruturados (JSON) + contadores mínimos em `data/logs/events.jsonl`.
-- Paginação CDP de busca (via parâmetro `page` + `--all-pages`).
-- CLI de perfis (básico): `profiles list/create/use` com atualização do `.env`.
-- Validação de ambiente (domínio/locale/timezone/proxy/perfil) via `env-validate`.
-- Tuning de circuito/concorrência (CDP): `CDP_INACTIVITY_S`, `CDP_CIRCUIT_ENABLED` (soft-circuit), `CDP_MAX_CONCURRENCY`; espera ajustada por `stagger`.
+### Done
+- Headful manual login with persisted session (`storage_state.json`).
+- Playwright search (basic scroll), card extraction and JSON/CSV export.
+- CDP PDP: capture via `Network.getResponseBody` and normalized export (JSON/CSV).
+- CDP Search: listing APIs capture and normalized export (JSON/CSV).
+- Enrichment: Search → PDP pipeline (serial and concurrent tabs).
+- `.env` config, locale/timezone, 3P cookies flag; directories and gitignore.
+- CDP + per‑profile proxy (basic): `--proxy-server` honors `PROXY_URL`.
+- Isolated profiles (basic): support for `PROFILE_NAME` → `.user-data/profiles/<PROFILE_NAME>`.
+- Minimal health‑check (CDP): if 0 responses captured, mark session as degraded in `data/session_status/<profile>.json` and abort.
+- Basic rate limiting (CDP): per‑minute navigation limit.
+- Recycling after N pages (CDP): split batches into sessions when `--launch`.
+- Headers/timezone coherence (CDP): `Accept-Language` and `timezone` aligned.
+- Expanded health‑check + circuit breaker (CDP): CAPTCHA/login/inactivity/403‑429 detection and early abort.
+- Backoff with `tenacity` at CDP critical points (navigate/enable/getResponseBody).
+- Cooldown between chunks when recycling CDP sessions.
+- Structured logs (JSON) + minimal counters in `data/logs/events.jsonl`.
+- CDP paginated search (via `page` param + `--all-pages`).
+- Profiles CLI (basic): `profiles list/create/use` updating `.env`.
+- Environment validation (domain/locale/timezone/proxy/profile) via `env-validate`.
+- Circuit/concurrency tuning (CDP): `CDP_INACTIVITY_S`, `CDP_CIRCUIT_ENABLED` (soft circuit), `CDP_MAX_CONCURRENCY`; staggered waits.
 
-### Parcial
-- Alinhamento de locale/UA/timezone (Playwright ok; CDP parcial – revisar UA e headers).
-- Deduplicação: agora global por `(shop_id,item_id)` nas exports (PDP e Busca).
-- Modelagem de dados: Schemas Pydantic aplicados a PDP/Busca.
-- Scroll de busca (CDP): carregar mais itens sem trocar `page` (UX com scroll infinito) — opcional/pendente.
-- Concorrência: abas concorrentes implementadas; sem scheduler/queue; métricas estruturadas básicas via CLI.
+### Partial
+- Locale/UA/timezone alignment (Playwright ok; CDP partial – review UA and headers).
+- Deduplication: now global by `(shop_id,item_id)` in exports (PDP and Search).
+- Data modeling: Pydantic schemas applied to PDP/Search.
+- Search scroll (CDP): load more items without changing `page` (infinite scroll UX) — optional/pending.
+- Concurrency: concurrent tabs implemented; no distributed scheduler/queue; basic structured metrics via CLI.
 
-### Backlog Priorizado (necessidade → menor; em cada nível: menor esforço → maior)
+### Prioritized Backlog (need → less; within each level: lower → higher effort)
 
-Nível 1 — Essenciais (Alta necessidade)
-- (sem itens pendentes nesta seção)
+Level 1 — Essentials (High need)
+- (no items pending in this section)
 
- Nível 2 — Importantes (Média necessidade)
-- Scroll em CDP Busca (opcional): simular scroll/troca de página interna para UX que carrega mais itens sem alterar `page`.
-- (concluído) Schemas Pydantic + dedup global `(shop_id,item_id)`.
-- Mapeamento domínio↔região/IP (impacto: médio, esforço: baixo): validação de coerência de geo/idioma/timezone antes de rodadas.
-- Proxy sticky avançado (impacto: médio, esforço: médio‑alto): suporte a extensão de autenticação/allowlist e session tag no username.
+Level 2 — Important (Medium need)
+- CDP Search scrolling (optional): simulate scroll/internal page change to load more items without changing `page`.
+- (done) Pydantic Schemas + global dedup `(shop_id,item_id)`.
+- Domain↔region/IP mapping (impact: medium, effort: low): validate geo/language/timezone coherence before runs.
+- Advanced sticky proxy (impact: medium, effort: medium‑high): extension for auth/allowlist and session tag in username.
 
-Nível 3 — Oportunidade (Baixa necessidade)
-- Persistência em banco (impacto: médio, esforço: médio‑alto): SQLite/Postgres com upsert.
-- CAPTCHA/OTP providers (impacto: médio, esforço: alto): 2Captcha/Anti‑Captcha e SMS API como fallback.
-- Scheduler/queue (impacto: alto p/ escala, esforço: alto): Celery/RQ + limites por perfil/IP.
-- Trilho mobile/anti‑detect (impacto: alto p/ resiliência, esforço: muito alto): app nativo/emulador e Kameleo.
+Level 3 — Opportunity (Low need)
+- DB persistence (impact: medium, effort: medium‑high): SQLite/Postgres with upsert.
+- CAPTCHA/OTP providers (impact: medium, effort: high): 2Captcha/Anti‑Captcha and SMS API as fallback.
+- Scheduler/queue (impact: high for scale, effort: high): Celery/RQ + per‑profile/IP limits.
+- Mobile/anti‑detect (impact: high for resilience, effort: very high): native app/emulator and Kameleo.
 
-## Mapa por Fase (Plano de Arquitetura)
-- Fase 1 (MVP): concluída.
-- Fase 2 (Produto/Modelo): parcial — Schemas Pydantic e dedup prontos; paginação por `page` implementada; falta scroll e cobertura de categorias.
-- Fase 3 (Resiliência): avançando — rate limiting, health-check + disjuntor, backoff e logs JSON mínimos; faltam métricas estruturadas.
-- Fase 4 (Perfis/Proxies): parcial — perfis isolados por `PROFILE_NAME` e `--proxy-server` básico; falta gestão de perfis via CLI e sticky avançado.
-- Fase 5 (CAPTCHA/OTP): pendente — somente manual.
-- Fase 6/7 (Escala/Orquestração CDP): parcial — concorrência por abas e reciclagem básica; falta scheduler/queue e métricas.
-- Fases 8–12 (Mobile, Anti‑detect, Banco, Observabilidade, Compliance): em aberto (parcial em compliance básico via .env/gitignore e limites conservadores).
+## Phase Map (Architecture Plan)
+- Phase 1 (MVP): complete.
+- Phase 2 (Product/Model): partial — Pydantic schemas and dedup ready; paging by `page` implemented; missing scroll and category coverage.
+- Phase 3 (Resilience): progressing — rate limiting, health‑check + circuit breaker, backoff and minimal JSON logs; lacking structured metrics.
+- Phase 4 (Profiles/Proxies): partial — isolated profiles by `PROFILE_NAME` and basic `--proxy-server`; missing advanced sticky and richer CLI management.
+- Phase 5 (CAPTCHA/OTP): pending — manual only.
+- Phase 6/7 (CDP scale/orchestration): partial — tab concurrency and basic recycling; missing distributed scheduler/queue and richer metrics.
+- Phases 8–12 (Mobile, Anti‑detect, DB, Observability, Compliance): open (partial compliance via .env/gitignore and conservative limits).
 
-## Itens de Ação Detalhados (priorizados)
+## Detailed Action Items (prioritized)
 
-### Alta Prioridade (proteção de contas)
-— CDP + Proxy por perfil
-  - Objetivo: isolar fingerprint e reputação por perfil/conta com IP coerente.
-  - Implementação (baixa complexidade):
-    - Em `src/shopee_scraper/cdp/collector.py`, incluir flag `--proxy-server=<proto>://host:port` em `_build_launch_cmd` quando `settings.proxy_url` estiver definido.
-    - Suporte a credenciais no próprio URL (`http://user:pass@host:port`) ou via extensão se necessário (posterior).
-    - Acrescentar variáveis por perfil (ex.: `PROFILE_NAME`, `PROFILE_PROXY_URL`) e resolver `user-data-dir` para `.user-data/profiles/<PROFILE_NAME>`.
-  - Sinais de sucesso: Chrome sai com IP correto (verificar em `https://ipecho.net/plain`), sessão permanece estável entre execuções.
-  - Riscos: proxies instáveis ou datacenter; preferir residencial/móvel.
+High Priority (account protection)
+— CDP + Proxy per profile
+  - Goal: isolate fingerprint and reputation per profile/account with coherent IP.
+  - Implementation (low complexity):
+    - In `src/shopee_scraper/cdp/collector.py`, include `--proxy-server=<proto>://host:port` in `_build_launch_cmd` when `settings.proxy_url` is set.
+    - Credentials in the URL (`http://user:pass@host:port`) or via extension if needed (later).
+    - Add per‑profile variables (e.g., `PROFILE_NAME`, `PROFILE_PROXY_URL`) and resolve `user-data-dir` to `.user-data/profiles/<PROFILE_NAME>`.
+  - Success signals: correct IP egress (check via an IP echo service), session remains stable between runs.
+  - Risks: unstable/datacenter proxies; prefer residential/mobile.
 
-— Perfis isolados
-  - Objetivo: cada conta tem seu perfil Chrome (cookies, cache, consent) e seu IP.
-  - Implementação (baixa complexidade):
-    - Permitir `PROFILE_NAME` no `.env`; montar `settings.user_data_dir = .user-data/profiles/<PROFILE_NAME>` se presente.
-    - Adicionar comandos no CLI: `profiles create/list/use` (opcional numa segunda etapa). Primeiro passo: só respeitar `PROFILE_NAME`.
-  - Sinais de sucesso: diretórios separados por perfil; nenhuma mistura de sessão entre contas.
+— Isolated profiles
+  - Goal: each account has its own Chrome profile (cookies, cache, consent) and IP.
+  - Implementation (low complexity):
+    - Allow `PROFILE_NAME` in `.env`; build `settings.user_data_dir = .user-data/profiles/<PROFILE_NAME>` if present.
+    - Add CLI: `profiles create/list/use` (optional later). First step: just honor `PROFILE_NAME`.
+  - Success: separate directories per profile; no session mixing.
 
-— Health-check & circuit breaker
-  - Objetivo: parar rápido ao detectar bloqueios para proteger reputação da conta/IP.
-  - Implementação (média-baixa):
-    - Reaproveitar heurísticas de `_is_captcha_gate` (Playwright) e adicionar verificação de redirecionamentos de login/erro.
-    - Expor `on_block(event, context)` que marca sessão degradada (ex.: arquivo `data/session_degraded/<perfil>.flag`) e aborta lote.
-    - Integrar ao trilho CDP: se não capturar respostas esperadas por N segundos ou se a navegação cair em `/verify/captcha`, acionar disjuntor e encerrar.
-  - Sinais de sucesso: lotes param automaticamente; logs mostram causa e próximo passo.
+— Health‑check & circuit breaker
+  - Goal: stop fast on block detection to protect account/IP reputation.
+  - Implementation (low‑medium):
+    - Reuse `_is_captcha_gate` heuristics (Playwright) and add checks for login/error redirects.
+    - Expose `on_block(event, context)` to mark session degraded (e.g., `data/session_degraded/<profile>.flag`) and abort batch.
+    - Integrate into CDP: if no expected responses for N seconds or navigation hits `/verify/captcha`, trip breaker and exit.
+  - Success: batches stop automatically; logs show cause/next step.
 
 — Rate limiting & backoff
-  - Objetivo: reduzir a taxa de eventos e reagir a sinais de throttling.
-  - Implementação (baixa):
-    - Criar util `rate_limiter(tokens_per_minute)` simples por processo/perfil.
-    - Aplicar `tenacity` com backoff exponencial para 429/5xx nos pontos de captura (ex.: re-tentar abrir PDP/esperar respostas).
-  - Sinais de sucesso: menor incidência de bloqueios; latência previsível.
+  - Goal: reduce event rate and react to throttling signals.
+  - Implementation (low):
+    - Create `rate_limiter(tokens_per_minute)` per process/profile.
+    - Apply `tenacity` with exponential backoff on 429/5xx.
+  - Success: fewer blocks; predictable latency.
 
-— Reciclagem por N páginas
-  - Objetivo: reduzir “padrões acumulados” por longas sessões.
-  - Implementação (baixa):
-    - Contador de páginas no CLI/CDP; após `PAGES_PER_SESSION`, fechar e relançar Chrome com o mesmo perfil/IP (cooldown curto).
-  - Sinais de sucesso: estabilidade após longos lotes; queda de bloqueios tardios.
+— Recycling after N pages
+  - Goal: reduce “accumulated patterns” in long sessions.
+  - Implementation (low):
+    - Page counter in CLI/CDP; after `PAGES_PER_SESSION`, close and relaunch Chrome with same profile/IP (short cooldown).
+  - Success: stability in long batches; fewer late‑run blocks.
 
-### Média Prioridade
-- Métricas estruturadas: agregações/relatório via CLI (`metrics summary`) e export (`metrics export`); notebook simples em `docs/metrics_example.ipynb`. Painel visual dedicado ainda pendente.
-- Paginação CDP (Busca)
-  - Simular scroll/troca de página e agregar múltiplas respostas antes do export.
-- Coerência de fingerprint (CDP)
-  - Alinhar UA/Accept-Language/timezone e consent; verificar 3P cookies ativas.
+Medium Priority
+- Structured metrics: aggregations/report via CLI (`metrics summary`) and export (`metrics export`); simple notebook in `docs/metrics_example.ipynb`. Dedicated UI pending.
+- CDP paging (Search): simulate scroll/internal page change and aggregate multiple responses before export.
+- Fingerprint coherence (CDP): align UA/Accept‑Language/timezone and consent; ensure 3P cookies enabled.
 
-### Baixa Prioridade
-- Banco (SQLite/Postgres) + upsert.
-- CAPTCHA/OTP providers (fallback manual como padrão).
-- Scheduler/queue (básico entregue; futuro: Celery/RQ e distribuição multi-instância).
-- Trilho mobile e anti‑detect.
+Low Priority
+- DB (SQLite/Postgres) + upsert.
+- CAPTCHA/OTP providers (manual fallback as default).
+- Scheduler/queue (basic delivered; future: Celery/RQ and multi‑instance distribution).
+- Mobile track and anti‑detect.
 
-## Operação Segura (recomendações)
-- Uma conta por perfil de navegador e por IP; jamais compartilhe IP entre contas simultâneas.
-- Evite headless; mantenha dwell/scrolls naturais; não dispare lotes longos sem reciclar instâncias.
-- Monitore sinais de bloqueio; ao primeiro sinal, interrompa e recicle perfil/IP.
-- Não altere IP no meio da sessão; não limpe cookies entre páginas da mesma sessão.
+## Safe Operation (recommendations)
+- One account per browser profile and per IP; never share IP across simultaneous accounts.
+- Avoid headless; keep natural dwell/scrolls; don’t run very long batches without recycling instances.
+- Monitor block signals; at first signal, stop and recycle profile/IP.
+- Do not change IP mid‑session; do not clear cookies between pages in the same session.
 
-## Histórico (resumo do que já foi feito)
-- [x] Login headful e `storage_state.json` (Playwright)
-- [x] Busca e export CSV/JSON (Playwright)
-- [x] CDP PDP: captura e export
-- [x] CDP Busca: captura e export
-- [x] Enriquecimento Busca→PDP, com concorrência por abas
-- [x] Configs via `.env`; 3P cookies flag; Accept-Language/timezone (Playwright)
-- [x] Proxy por perfil no CDP (básico)
-- [x] Perfis isolados multi-conta (básico via `PROFILE_NAME`)
-- [x] Health-check mínimo (marca sessão degradada se 0 respostas)
-- [x] Rate limiting básico (por minuto)
-- [x] Reciclagem por N páginas (CDP, quando `--launch`)
-- [x] Logs JSON + métricas
-- [x] Schemas Pydantic + dedup global
-- [x] Paginação CDP (Busca) via parâmetro `page`
-- [x] CLI de perfis (list/create/use) + validação de ambiente
-- [x] Métricas estruturadas básicas via CLI (summary por perfil/proxy)
-- [x] Fila local e scheduler simples via CLI (`queue add-*`, `queue run`, `queue list`)
-- [ ] Scroll (Busca) via CDP
-- [ ] Banco (SQLite/Postgres) com upsert
-- [ ] CAPTCHA/OTP providers
-- [ ] Scheduler/queue (escala)
-- [ ] Trilho mobile e anti‑detect
-
-Infra de qualidade
-- [x] Testes unitários básicos (utils de IO e exportadores CDP)
-
----
-
-Sugestão de próxima sprint (proteção de contas):
-1) Scroll em CDP de busca (infinite scroll) para agregar itens carregados sem mudança de `page`.
-2) Mapeamento domínio↔região/IP e validação de coerência (geo/idioma/timezone) antes de lotes.
-3) Métricas estruturadas (agregações/painel simples) sobre os logs JSON.
-
-## Como começar a implementar (atalhos)
-- Código relevante:
-  - CDP: `src/shopee_scraper/cdp/collector.py` (lançamento do Chrome, filtros, navegação, captura de bodies).
-  - Config: `src/shopee_scraper/config.py` (settings via `.env`).
-  - CLI: `cli.py` (comandos `cdp-*` e fluxo batch/concurrent).
-  - Utilitários: `src/shopee_scraper/utils.py` (delays, IO).
-- Passos práticos (proxy + perfil):
-  1) Adicionar `--proxy-server` em `_build_launch_cmd` se `settings.proxy_url` estiver definido.
-  2) Ler `PROFILE_NAME` do `.env` e ajustar `settings.user_data_dir` para `.user-data/profiles/<PROFILE_NAME>` se presente.
-  3) Testar manualmente com `python cli.py cdp-login` (ver IP) e depois `cdp-search` em baixo volume.
-- Passos práticos (health-check):
-  1) Encapsular heurísticas de bloqueio (captcha/login wall) e expor `is_degraded()`.
-  2) Em fluxos `cdp-*`, se `is_degraded()` → encerrar lote, escrever flag e logar causa.
-- Passos práticos (rate limiting/backoff):
-  1) Implementar um `RateLimiter` simples (token bucket ou sleep por janela).
-  2) Decorar pontos de navegação/captura com `tenacity` para 429/5xx.
+## History (summary)
+- [x] Headful login and `storage_state.json` (Playwright)
+- [x] Search and CSV/JSON export (Playwright)
+- [x] CDP PDP: capture and export
+- [x] CDP Search: capture and export
+- [x] Search→PDP enrichment with concurrent tabs
+- [x] `.env` configs; 3P cookies flag; Accept‑Language/timezone (Playwright)
+- [x] Per‑profile proxy in CDP (basic)
+- [x] Isolated multi‑account profiles (basic via `PROFILE_NAME`)
+- [x] Minimal health‑check (marks session degraded if 0 responses)
+- [x] Basic rate limiting (per minute)
+- [x] Recycling after N pages (CDP, when `--launch`)
+- [x] JSON logs + metrics
+- [x] Pydantic schemas + global dedup
+- [x] CDP search paging via `page`
+- [x] Profiles CLI (list/create/use) + env validation
+- [x] Basic structured metrics via CLI (summary by profile/proxy)
+- [x] Local file queue and simple scheduler via CLI (`queue add-*`, `queue run`, `queue list`)
+- [ ] Search scroll via CDP

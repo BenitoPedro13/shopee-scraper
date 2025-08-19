@@ -12,6 +12,7 @@ from src.shopee_scraper.cdp.collector import (
     collect_pdp_batch,
     collect_pdp_batch_concurrent,
     collect_search_paged,
+    collect_search_all,
 )
 from src.shopee_scraper.cdp.exporter import (
     export_pdp_from_jsonl,
@@ -192,11 +193,22 @@ def cdp_search(
     timeout: float = typer.Option(20.0, "--timeout", help="Tempo de captura por página após navegação (s)"),
     pages: int = typer.Option(1, "--pages", "-p", help="Quantidade de páginas a capturar (via parâmetro page)"),
     start_page: int = typer.Option(0, "--start-page", help="Página inicial (0 = primeira)"),
+    all_pages: bool = typer.Option(False, "--all-pages/--no-all-pages", help="Paginar até o fim (para quando não houver novas respostas)"),
+    max_pages: int = typer.Option(100, "--max-pages", help="Limite superior de páginas no modo --all-pages"),
     auto_export: bool = typer.Option(True, "--export/--no-export", help="Exporta JSON/CSV após capturar"),
 ):
     """Captura APIs de busca via CDP e (opcional) exporta resultados normalizados."""
     try:
-        if pages and pages > 1:
+        if all_pages:
+            jsonl = collect_search_all(
+                keyword=keyword,
+                launch=launch,
+                timeout_s=timeout,
+                start_page=start_page,
+                max_pages=max_pages,
+                pause_s=0.5,
+            )
+        elif pages and pages > 1:
             jsonl = collect_search_paged(
                 keyword=keyword,
                 pages=pages,

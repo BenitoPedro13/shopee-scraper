@@ -126,3 +126,77 @@ Roadmap Resumido
 10) Banco/exports
 11) Observabilidade
 12) Manutenção contínua
+
+-------------------------------------------------------------------------------
+ADENDO (2025-08) — Estado Atual, Lacunas para Escala e Próximos Passos
+-------------------------------------------------------------------------------
+
+Estado Atual — Resumo (MVP+ com CDP)
+- Captura CDP: coleta passiva de APIs (ex.: /api/v4/pdp/get_pc) em Chrome real via DevTools.
+- Perfis & Proxy: `PROFILE_NAME` isola diretórios `.user-data/profiles/<name>`; `PROXY_URL` encamina tráfego (normalização p/ `--proxy-server`).
+- Coerência: `Accept-Language` e `timezone` alinhados às configs; 3P cookies habilitadas por flag.
+- Concurrency: abas concorrentes em lotes PDP, com `CDP_MAX_CONCURRENCY` e `stagger` por aba.
+- Reciclagem: divisão automática por `PAGES_PER_SESSION` quando `--launch`, com cooldown aleatório curto.
+- Proteções: disjuntor (CAPTCHA/login/inatividade/403–429), backoff (tenacity), rate limit por minuto, logs estruturados JSONL e métricas básicas via CLI.
+- Fila local: scheduler de arquivos (JSON) com `queue add-*`, `queue run`, `queue list`.
+- Export: normalização com Pydantic, dedup global por `(shop_id,item_id)`; saída CSV/JSON.
+
+Lacunas para Escala (por que seu setup atual não escala)
+- Única máquina/IP/perfil: um único fingerprint/IP concentra tráfego, reduz throughput e aumenta detecção/bloqueios.
+- Fila local (arquivos): não distribui tarefas entre processos/hosts; sem rate limiting global por perfil/IP.
+- Limitador em processo: ao adicionar workers, estoura orçamento por IP por falta de coordenação global.
+- Saídas em arquivos: difícil de agregar/deduplicar e alimentar consumidores quando há paralelismo real.
+- Gerência de Chrome: alocação estática de porta única (`CDP_PORT`) e risco de colisão se houver múltiplas instâncias.
+
+Mudanças Recomendadas para Escala (o que e por quê)
+1) Registro de Perfis & Proxies
+   - O que: `profiles.yaml` com `profile_name`, `proxy_url (sticky)`, `locale`, `timezone`, `rps_limit`, `cdp_port_range`.
+   - Por quê: vincular 1 perfil ↔ 1 IP, com limites e parâmetros por perfil, garantindo higiene geo/idioma e isolamento.
+
+2) Fila Distribuída + Workers
+   - O que: substituir scheduler de arquivos por Redis (RQ/Celery) e adicionar comando `worker` por perfil.
+   - Por quê: distribuir tarefas entre múltiplos processos/hosts; roteamento por domínio/região; reintentos consistentes.
+
+3) Rate Limiting & Locks Globais
+   - O que: token buckets por `profile_name` e `proxy_url` em Redis e lock de exclusão mútua por perfil.
+   - Por quê: evitar floods ao escalar horizontalmente; impedir dois workers de usar o mesmo perfil simultaneamente.
+
+4) Gestão de Chrome/CDP
+   - O que: `CDP_PORT_RANGE` e alocador de porta livre; trava por `user-data-dir`; reciclagem com jitter.
+   - Por quê: rodar múltiplos Chromes sem colisão de porta/perfil; reduzir padrões detectáveis em sessões longas.
+
+5) Persistência e Idempotência
+   - O que: banco (SQLite/Postgres) com upsert por `(shop_id,item_id)` e partições por data/perfil/proxy.
+   - Por quê: deduplicação cross-workers, fácil consulta/entrega e reprocessamento idempotente.
+
+6) Observabilidade
+   - O que: logs centralizados (stdout → collector), métricas por perfil/proxy (sucesso, duração, bans/hora), painel simples.
+   - Por quê: operar com segurança, detectar degradações, priorizar perfis/rotas mais saudáveis.
+
+7) Segurança e Higiene
+   - O que: segredos fora do repo; `storage_state.json` nunca versionado; evitar troca de IP no meio da sessão.
+   - Por quê: proteger contas e reduzir riscos operacionais.
+
+8) Empacotamento & Deploy
+   - O que: container com Chrome estável e deps Python; entrypoints `worker` e `queue`; supervisão de processos.
+   - Por quê: padronizar execução e habilitar escala horizontal previsível.
+
+Como Atingir (passos práticos e impacto)
+- Curto prazo (baixo risco)
+  1) `profiles.yaml` + loader; validar coerência domínio↔locale↔timezone↔proxy.
+  2) Alocador de porta: `CDP_PORT_RANGE` e lock por `user-data-dir`.
+  3) Containerizar (Dockerfile) e parametrizar via `.env`/perfis.
+
+- Médio prazo (habilita escala real)
+  4) Redis + RQ/Celery: trocar scheduler local; adicionar `cli worker --profile X`.
+  5) Token bucket + locks (Redis): aplicar em todos caminhos CDP (busca/PDP).
+  6) Upsert em SQLite/Postgres: exporters gravam também no banco.
+
+- Longo prazo (observabilidade/resiliência)
+  7) Métricas centralizadas e painel simples; alarmes por taxa de bans.
+  8) Trilho mobile/anti-detect (fallback estratégico) se CDP degradar.
+
+Critérios de Aceitação (exemplos)
+- Dois workers em uma mesma máquina, cada um com perfil/IP distintos, rodando 8 abas cada, sem colisão de porta e sem violar RPS por IP.
+- Reexecução de lote não duplica `(shop_id,item_id)` no banco; exports idempotentes.
+- `metrics summary` mostra sucesso/latência/bloqueios por perfil/proxy de múltiplas execuções e hosts.

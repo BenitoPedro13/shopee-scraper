@@ -157,11 +157,13 @@ Notas:
 - Coletar somente dados públicos; respeitar robots.txt e ToS.
 - Evitar PII; usar limites conservadores; manter 1 IP por sessão.
 
-## Próximos Passos
-- Scroll em busca (CDP): cobrir UX que carrega mais itens sem alterar `page` (infinite scroll) e agregar respostas antes do export.
-- Métricas estruturadas: agregações/painel simples sobre `data/logs/events.jsonl` (taxa de sucesso, latência, bloqueios por perfil/IP).
-- Mapeamento domínio↔região/IP: checagens fortes para coerência de geo/idioma/timezone antes de lotes.
-- Coerência de fingerprint: revisar UA/headers/timezone/CDP e consent.
+## Documentação Unificada
+- Handbook do produto: `docs/PRODUCT_HANDBOOK.md` (visão, estado atual, metas, roadmap, operações)
+- Backlog estruturado: `docs/BACKLOG.md` (milestones, tarefas, prioridade, complexidade, tags)
+- Arquitetura: `docs/ARCHITECTURE_PLAN.txt` (com adendo 2025‑08)
+- Requisitos & Status: `docs/REQUIREMENTS_STATUS.md` (com adendo de escala 2025‑08)
+- Roteiro de Escala: `docs/SCALING_ROADMAP.md`
+- Multi‑site (design): `docs/MULTISITE_ADAPTERS.md`
 
 ## Testes
 - Rodar testes:

@@ -4,6 +4,57 @@
 
 Este documento acompanha o progresso do projeto com prioridade máxima em proteger contas durante o desenvolvimento (minimizar bans e degradação de sessão).
 
+---
+ADENDO DE ESCALA (2025-08) — Estado atual, limitadores e como escalar
+
+Estado Atual (síntese)
+- CDP estável para PDP e Busca, com filtros padrão e export normalizado (JSON/CSV), dedup por `(shop_id,item_id)`.
+- Concurrency via abas com reciclagem por `PAGES_PER_SESSION` e cooldown aleatório curto.
+- Disjuntor (captcha/login/inatividade/403–429) + backoff (tenacity) reduzem danos e marcam sessão como degradada.
+- Fila local baseada em arquivos funciona bem em 1 host, porém não coordena recursos entre múltiplos processos/hosts.
+
+Limitadores Atuais (por que seu setup atual não escala)
+- Único IP/perfil e um único host: throughput limitado e maior risco de detecção.
+- Sem rate limiting global e locks: ao adicionar workers, estoura orçamento por IP e perfis podem ser usados em paralelo por engano.
+- Porta CDP única (fixa): impede múltiplas instâncias de Chrome no mesmo host sem colisões.
+- Persistência somente em arquivos: dificulta dedup cross-workers e consultas/entrega em tempo real.
+
+Prioridade Atual — Proteger Contas e Escalar com Segurança
+- Distribuir tarefas entre múltiplos perfis/IPs (sticky), com limites por perfil e por proxy.
+- Eliminar colisões de porta/perfil ao rodar vários Chromes no mesmo host.
+- Garantir idempotência em reprocessos (upsert por `(shop_id,item_id)`), sem duplicidade.
+
+Backlog Priorizado — Itens novos p/ escala (complementares ao que já consta abaixo)
+- Registro de perfis & proxies (`profiles.yaml`) com `profile_name`, `proxy_url`, `locale`, `timezone`, `rps_limit`, `cdp_port_range`.
+- Alocador de porta CDP (`CDP_PORT_RANGE`) + lock por `user-data-dir` para impedir corrida de perfis.
+- Fila distribuída (Redis + RQ/Celery) e comando `worker` com roteamento por perfil/região.
+- Rate limiting global por `profile_name` e `proxy_url` (token bucket Redis) + locks distribuídos.
+- Persistência em SQLite/Postgres com upsert por `(shop_id,item_id)` e índices; exporters gravam também no DB.
+- Logs centralizados + métricas por perfil/proxy (sucesso, duração, bans/hora) e painel simples.
+- Containerização (Chrome estável + deps) com entrypoints `worker`/`queue` e parametrização por perfil.
+
+Como Atingir (guia de implementação)
+1) Profiles & Proxies
+   - Criar `docs/profiles.example.yaml` e `data/profiles.yaml` (gitignored) com parâmetros por perfil.
+   - `src/shopee_scraper/profiles.py`: loader + validação; CLI para listar/validar.
+2) Chrome/CDP
+   - `CDP_PORT_RANGE=9300-9400` no `.env`; alocar porta livre por worker.
+   - Lockfile por `user-data-dir` para impedir uso simultâneo do mesmo perfil.
+3) Empacote
+   - Dockerfile com Chrome estável e fonts; entrypoints `cli.py worker`, `cli.py queue`.
+4) Fila + Workers
+   - Adotar Redis e RQ/Celery; adaptar `scheduler.py` mantendo fallback local.
+   - `cli.py workers start --profiles br_01 br_02` para spawn local.
+5) Rate limiting & Locks
+   - `limits.py` com token bucket Redis e `with_profile_lock(profile)`; usar em todos os caminhos CDP.
+6) Persistência
+   - `db.py` (SQLite primeiro) e `exporter` salvando também no DB (upsert por `(shop_id,item_id)`).
+
+Métricas de Sucesso
+- 2+ workers por host, 2+ hosts, sem violar RPS por perfil/IP; sem colisão de porta/perfil.
+- Reprocessos não criam duplicatas no DB; exports consistentes.
+- `metrics summary/export` refletem execuções distribuídas por perfil/proxy.
+
 ## Prioridade Atual — Proteger Contas
 - Perfil por conta: um `user-data-dir` exclusivo por conta/sessão. Nunca reutilize perfis entre contas.
 - 1 IP por perfil: proxy residencial/móvel estável e geolocalizado. Evite trocar IP no meio da sessão (sticky session).

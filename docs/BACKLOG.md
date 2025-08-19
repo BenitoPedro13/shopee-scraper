@@ -94,3 +94,41 @@ Goals: Smooth operations, contributor experience, and compliance.
 Notes
 - Estimates assume a single engineer; parallelization changes timelines.
 - Each milestone should ship with: updated docs, minimal tests, and a rollback plan.
+
+## Milestone M9 — SDK MVP (2–4 weeks)
+Goals: Deliver a developer-friendly library so users plug site logic without handling anti-bot and orchestration details.
+
+- [P0, L, `core`,`multi-site`,`docs`] Extract core engine and site adapter seam
+  - Move reusable CDP logic to `src/core`; implement `ISiteAdapter` and extract Shopee adapter; update docs/MULTISITE_ADAPTERS.md if needed.
+- [P0, M, `core`,`docs`] Public Python API and quickstarts
+  - `Client(site, profile, proxy)` with `search()` and `enrich_pdp()`; write two quickstarts and docstrings.
+- [P1, M, `infra`,`ops`] PyPI packaging and versioning
+  - Build and publish package (name TBD); semantic versioning; basic changelog.
+- [P1, M, `observability`,`docs`] Error model and messages
+  - Standardize exceptions (e.g., BlockDetected, ProxyAuthRequired); document troubleshooting.
+- [P1, M, `core`,`security`] Safe defaults for limits
+  - Set conservative RPM/timeouts/concurrency per adapter; expose overrides.
+
+Acceptance Criteria
+- Installing the package and running two copy-paste examples works without code changes beyond env setup.
+- Shopee behavior via SDK matches current CLI outputs (same normalized CSV/JSON) for a sample run.
+- Clear errors for common failures (captcha/login, proxy auth, port in use) with documented fixes.
+
+## Milestone M10 — SaaS Beta (4–8 weeks)
+Goals: Managed execution with simple HTTP API, keys, and a basic dashboard to retrieve outputs.
+
+- [P0, L, `infra`,`ops`] Worker container with Chrome and launcher
+  - Docker image, health checks, environment-driven config; CDP port allocator and profile locks.
+- [P0, L, `infra`,`ops`] Redis queue + API service (REST)
+  - Endpoints: `POST /v1/jobs/search`, `POST /v1/jobs/pdp`, `GET /v1/jobs/{id}`; enqueue, track, and return links.
+- [P1, L, `data`,`ops`] Storage for outputs and metadata
+  - Store raw JSONL (object storage) and normalized CSV/JSON; job/run table with counters and timings.
+- [P1, M, `security`,`ops`] API keys and basic quotas
+  - Key issuance, per-key/min quotas and RPM caps; request validation.
+- [P2, M, `observability`,`ops`] Minimal dashboard
+  - List jobs, status, success rate, bans/hour, and download links for recent runs.
+
+Acceptance Criteria
+- Creating a job via REST returns a job id and, when done, accessible links to outputs (JSONL + CSV/JSON).
+- Quotas enforced per API key; jobs fail gracefully on block signals with clear status.
+- Two workers on one host process multiple jobs concurrently without port/profile collisions.

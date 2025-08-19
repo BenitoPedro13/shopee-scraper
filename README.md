@@ -48,6 +48,7 @@ CDP_FILTER_PATTERNS=
   - Observação: credenciais embutidas (`user:pass@host:port`) são removidas da flag; o Chrome solicitará usuário/senha via prompt (ou use allowlist de IP no provedor).
   - Coerência: o CDP alinha `Accept-Language` e `timezone` com as configs do `.env`.
   - Use `PROFILE_NAME` para isolar diretórios por conta: `.user-data/profiles/<PROFILE_NAME>`.
+  - Exports: normalização e validação com Schemas Pydantic; deduplicação global por `(shop_id,item_id)` nas exports de PDP e Busca.
 
 ## Uso (CLI)
 Comandos principais:
@@ -81,9 +82,18 @@ Notas:
 - Para consistência com o CDP, você pode usar `cdp-login` + `cdp-search` e pular o Playwright.
 - Saída CDP: `data/cdp_pdp_<timestamp>.jsonl` (uma linha por resposta capturada com url/status/headers/body).
   - Para busca: `data/cdp_search_<timestamp>.jsonl` + exports `_export.json`/`_export.csv`.
-  - Health-check: se nenhuma resposta CDP for capturada no tempo limite, o perfil é marcado como degradado em `data/session_status/<perfil>.json` e o comando falha.
+  - Health-check & disjuntor: se sinais de bloqueio ocorrerem, o perfil é marcado como degradado em `data/session_status/<perfil>.json` e o comando falha. Sinais:
+    - Navegação para páginas de verificação/login (ex.: `/verify/captcha`, `/account/login`, "captcha").
+    - Respostas 403/429 nas APIs filtradas.
+    - Inatividade de rede prolongada sem respostas relevantes.
   - Rate limiting: navegações via CDP são limitadas por `REQUESTS_PER_MINUTE`.
-  - Reciclagem: se `PAGES_PER_SESSION` > 0 e `--launch` estiver ativo, lotes longos são divididos em sessões menores (Chrome relançado entre chunks) e os JSONLs são concatenados.
+  - Reciclagem: se `PAGES_PER_SESSION` > 0 e `--launch` estiver ativo, lotes longos são divididos em sessões menores (Chrome relançado entre chunks) e os JSONLs são concatenados. Há um cooldown aleatório curto (2–5s) entre sessões para reduzir padrões de reconexão.
+
+## Proteções recentes (CDP)
+- Disjuntor: aborta cedo ao detectar CAPTCHA/login/inatividade/403-429 e marca sessão como degradada.
+- Backoff: re-tentativas exponenciais com jitter para `Page.navigate`, `Network.getResponseBody` e enable de domínios CDP.
+- Cooldown: pausa aleatória entre sessões quando há reciclagem por `PAGES_PER_SESSION`.
+- Logs JSON: eventos e métricas mínimas gravados em `data/logs/events.jsonl` (inclui counters como navegações, matches, bloqueios e duração por execução).
 
 ## Estrutura
 ```
@@ -113,11 +123,10 @@ Notas:
 - Evitar PII; usar limites conservadores; manter 1 IP por sessão.
 
 ## Próximos Passos
-- Exportador PDP: parsear JSONL do CDP para JSON/CSV normalizado.
-- Captura CDP de busca/listagens: extrair PDPs das APIs de listagem.
-- Batch PDP: processar lista de URLs com pacing humano e reciclagem de instâncias.
-- Resiliência: retries/backoff, limites por perfil, detecção/pausa em bloqueios.
-- Proxies/Perfis: 1 IP por perfil (resid./mobile), alinhado à região, sem troca no meio da sessão.
+- Logs JSON + métricas básicas (sucesso/bloqueio/latência) por perfil/IP.
+- Schemas Pydantic + dedup global `(shop_id,item_id)` nas exports.
+- Paginação/scroll em CDP de busca para agregar múltiplas páginas.
+- CLI de perfis: `profiles create/list/use` (qualidade de vida).
 
 ## Testes
 - Rodar testes:

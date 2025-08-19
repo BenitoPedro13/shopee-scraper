@@ -28,26 +28,27 @@ Este documento acompanha o progresso do projeto com prioridade máxima em proteg
 - Rate limiting básico (CDP): limite por minuto em navegações.
 - Reciclagem por N páginas (CDP): divisão de lotes em sessões quando `--launch`.
 - Coerência de headers/timezone (CDP): `Accept-Language` e `timezone` alinhados.
+- Health-check ampliado + disjuntor (CDP): detecção de CAPTCHA/login/inatividade/403-429 e abort early.
+- Backoff com `tenacity` nos pontos críticos do CDP (navigate/enable/getResponseBody).
+- Cooldown entre chunks ao reciclar sessões CDP.
+- Logs estruturados (JSON) + contadores mínimos em `data/logs/events.jsonl`.
 
 ### Parcial
 - Alinhamento de locale/UA/timezone (Playwright ok; CDP parcial – revisar UA e headers).
-- Deduplicação: heurística na busca; sem garantia global `(shop_id,item_id)` nas exports.
-- Modelagem de dados: ainda sem Schemas Pydantic (dicts livres).
+- Deduplicação: agora global por `(shop_id,item_id)` nas exports (PDP e Busca).
+- Modelagem de dados: Schemas Pydantic aplicados a PDP/Busca.
 - Paginação CDP de busca: captura janela atual; sem rolagem/múltiplas páginas agregadas.
 - Concorrência: abas concorrentes implementadas; sem scheduler/queue/métricas estruturadas.
 
 ### Backlog Priorizado (necessidade → menor; em cada nível: menor esforço → maior)
 
 Nível 1 — Essenciais (Alta necessidade)
-- Health-check ampliado (impacto: alto, esforço: baixo): detectar URLs/DOM de CAPTCHA/login wall em CDP; parar lote e marcar degradado.
-- Backoff com `tenacity` (impacto: alto, esforço: baixo): retries exponenciais para attach/tab/navigate/getResponseBody e 429/5xx.
-- Cooldown entre chunks (impacto: médio, esforço: baixo): pequena pausa ao reciclar sessões CDP para reduzir desconexões.
-- Logs estruturados + contadores mínimos (impacto: alto, esforço: médio): JSON logging + métricas simples (sucesso, capturas, falhas, tempo).
+- (sem itens pendentes nesta seção)
 
 Nível 2 — Importantes (Média necessidade)
 - CLI de perfis (impacto: médio, esforço: baixo): comandos `profiles create/list/use` e validações de ambiente.
 - Paginação/scroll em CDP Busca (impacto: médio, esforço: médio): agregar múltiplas páginas antes do export.
-- Schemas Pydantic + dedup (impacto: médio, esforço: médio): `SearchItem`/`PdpItem` e deduplicação global `(shop_id,item_id)`.
+- (concluído) Schemas Pydantic + dedup global `(shop_id,item_id)`.
 - Mapeamento domínio↔região/IP (impacto: médio, esforço: baixo): validação de coerência de geo/idioma/timezone antes de rodadas.
 - Proxy sticky avançado (impacto: médio, esforço: médio‑alto): suporte a extensão de autenticação/allowlist e session tag no username.
 
@@ -60,7 +61,7 @@ Nível 3 — Oportunidade (Baixa necessidade)
 ## Mapa por Fase (Plano de Arquitetura)
 - Fase 1 (MVP): concluída.
 - Fase 2 (Produto/Modelo): parcial — normalização básica, falta Schemas e dedup formal.
-- Fase 3 (Resiliência): parcial — rate limiting básico e health-check mínimo; falta backoff/tenacity, métricas e disjuntor mais amplo.
+- Fase 3 (Resiliência): avançando — rate limiting, health-check ampliado com disjuntor e backoff; faltam métricas estruturadas.
 - Fase 4 (Perfis/Proxies): parcial — perfis isolados por `PROFILE_NAME` e `--proxy-server` básico; falta gestão de perfis via CLI e sticky avançado.
 - Fase 5 (CAPTCHA/OTP): pendente — somente manual.
 - Fase 6/7 (Escala/Orquestração CDP): parcial — concorrência por abas e reciclagem básica; falta scheduler/queue e métricas.
@@ -140,8 +141,8 @@ Nível 3 — Oportunidade (Baixa necessidade)
 - [x] Health-check mínimo (marca sessão degradada se 0 respostas)
 - [x] Rate limiting básico (por minuto)
 - [x] Reciclagem por N páginas (CDP, quando `--launch`)
-- [ ] Schemas Pydantic + dedup global
-- [ ] Logs JSON + métricas
+- [x] Logs JSON + métricas
+- [x] Schemas Pydantic + dedup global
 - [ ] Paginação CDP (Busca)
 - [ ] Banco (SQLite/Postgres) com upsert
 - [ ] CAPTCHA/OTP providers

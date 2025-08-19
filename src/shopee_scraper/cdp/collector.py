@@ -19,7 +19,7 @@ except Exception:  # pragma: no cover
     pychrome = None  # defer import error to runtime message
 
 from ..config import settings
-from ..utils import ensure_data_dir
+from ..utils import ensure_data_dir, mark_session_status, current_profile_name, RateLimiter
 
 
 def _default_chrome() -> Optional[str]:
@@ -47,6 +47,34 @@ def _default_chrome() -> Optional[str]:
     return None
 
 
+def _normalize_proxy_for_chrome(url: str) -> str:
+    """Chrome's --proxy-server supports http, socks, socks4, socks5.
+    Providers often label endpoints as "https" but they are HTTP CONNECT proxies.
+    Map https -> http, socks5h -> socks5, socks4a -> socks4.
+    """
+    try:
+        import urllib.parse as _url
+        p = _url.urlsplit(url)
+        scheme = (p.scheme or "").lower()
+        netloc = p.netloc or p.path  # tolerate host:port without scheme
+        # Strip credentials if present: user:pass@host:port -> host:port
+        if "@" in netloc:
+            netloc = netloc.split("@", 1)[1]
+        hostport = netloc
+        if scheme in ("https",):
+            scheme = "http"
+        elif scheme in ("socks5h",):
+            scheme = "socks5"
+        elif scheme in ("socks4a",):
+            scheme = "socks4"
+        elif scheme == "":
+            # Assume http if not specified
+            scheme = "http"
+        return f"{scheme}://{hostport}".rstrip("/")
+    except Exception:
+        return url
+
+
 def _build_launch_cmd(port: int) -> List[str]:
     exe = settings.browser_executable_path or _default_chrome()
     if not exe:
@@ -63,7 +91,18 @@ def _build_launch_cmd(port: int) -> List[str]:
     # Some CAPTCHA widgets require 3P cookies
     if settings.disable_3pc_phaseout:
         args.append("--test-third-party-cookie-phase-out=false")
+    # Route traffic via proxy if configured
+    if settings.proxy_url:
+        args.append(f"--proxy-server={_normalize_proxy_for_chrome(settings.proxy_url)}")
     return args
+
+
+def _accept_language_header(locale_code: str) -> str:
+    primary = locale_code
+    base = locale_code.split("-")[0]
+    if base != primary:
+        return f"{primary},{base};q=0.9"
+    return f"{primary},{base};q=0.9"
 
 
 @dataclass
@@ -140,6 +179,16 @@ class CdpCollector:
         tab.start()
         tab.call_method("Network.enable")
         tab.call_method("Page.enable")
+        # Align headers/timezone
+        try:
+            al = _accept_language_header(settings.locale)
+            tab.call_method("Network.setExtraHTTPHeaders", headers={"Accept-Language": al})
+        except Exception:
+            pass
+        try:
+            tab.call_method("Emulation.setTimezoneOverride", timezoneId=settings.timezone_id)
+        except Exception:
+            pass
         return tab
 
     def dump_items_jsonl(self, path: Path) -> int:
@@ -165,8 +214,18 @@ def start_chrome_if_requested(port: int, launch: bool) -> Optional[subprocess.Po
     cmd = _build_launch_cmd(port)
     logger.info(f"Launching Chrome: {' '.join(shlex.quote(c) for c in cmd)}")
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    # give Chrome a moment to open the debugging endpoint
-    time.sleep(1.5)
+    # Wait for DevTools endpoint to be ready
+    import urllib.request as _u
+    import socket as _s
+    start = time.time()
+    while time.time() - start < 20.0:
+        try:
+            with _u.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1.5) as resp:
+                if resp.status == 200:
+                    break
+        except Exception:
+            pass
+        time.sleep(0.5)
     return proc
 
 
@@ -201,6 +260,16 @@ def collect_pdp_once(url: str, launch: bool = False, timeout_s: float = 20.0) ->
         out_path = data_dir / f"cdp_pdp_{ts}.jsonl"
         n = collector.dump_items_jsonl(out_path)
         logger.info(f"Captured {n} matching responses → {out_path}")
+        if n <= 0:
+            try:
+                mark_session_status(
+                    profile=current_profile_name(),
+                    status="degraded",
+                    reason="no_matching_cdp_responses_pdp",
+                )
+            except Exception:
+                pass
+            raise RuntimeError("No matching CDP responses captured (PDP). Session marked as degraded.")
         return out_path
     finally:
         try:
@@ -252,6 +321,16 @@ def collect_search_once(keyword: str, launch: bool = False, timeout_s: float = 2
         out_path = data_dir / f"cdp_search_{ts}.jsonl"
         n = collector.dump_items_jsonl(out_path)
         logger.info(f"Captured {n} matching responses → {out_path}")
+        if n <= 0:
+            try:
+                mark_session_status(
+                    profile=current_profile_name(),
+                    status="degraded",
+                    reason="no_matching_cdp_responses_search",
+                )
+            except Exception:
+                pass
+            raise RuntimeError("No matching CDP responses captured (Search). Session marked as degraded.")
         return out_path
     finally:
         try:
@@ -312,40 +391,76 @@ def collect_pdp_batch(
     patterns = [p.strip() for p in env_patterns.split(",") if p.strip()] if env_patterns else default_patterns
 
     filters = CdpFilters.from_patterns(patterns)
-    proc = start_chrome_if_requested(port, launch)
-    try:
-        collector = CdpCollector(port=port, filters=filters)
-        tab = collector.new_tab()
 
-        total = len(urls)
-        for idx, u in enumerate(urls, start=1):
-            try:
-                logger.info(f"Navigating PDP: {u}")
+    # Helper to run a single session over a subset of URLs
+    def _run_once(sub: List[str]) -> Path:
+        limiter = RateLimiter(settings.requests_per_minute)
+        proc = start_chrome_if_requested(port, launch)
+        try:
+            collector = CdpCollector(port=port, filters=filters)
+            tab = collector.new_tab()
+            total = len(sub)
+            for i, u in enumerate(sub, start=1):
+                try:
+                    limiter.acquire()
+                    logger.info(f"Navigating PDP: {u}")
+                    if on_progress:
+                        on_progress("start", {"index": i, "total": total, "url": u})
+                    tab.call_method("Page.navigate", url=u)
+                except Exception as e:
+                    logger.warning(f"Failed to navigate to {u}: {e}")
+                    continue
+                t0 = time.time()
+                while time.time() - t0 < timeout_s:
+                    time.sleep(0.25)
+                time.sleep(max(0.0, pause_s))
                 if on_progress:
-                    on_progress("start", {"index": idx, "total": total, "url": u})
-                tab.call_method("Page.navigate", url=u)
-            except Exception as e:
-                logger.warning(f"Failed to navigate to {u}: {e}")
-                continue
-            t0 = time.time()
-            while time.time() - t0 < timeout_s:
-                time.sleep(0.25)
-            time.sleep(pause_s)
-            if on_progress:
-                on_progress("done", {"index": idx, "total": total, "url": u})
+                    on_progress("done", {"index": i, "total": total, "url": u})
+            data_dir = ensure_data_dir()
+            ts = int(time.time())
+            out_path = data_dir / f"cdp_pdp_batch_{ts}.jsonl"
+            n = collector.dump_items_jsonl(out_path)
+            logger.info(f"Captured {n} PDP responses in batch → {out_path}")
+            if n <= 0:
+                try:
+                    mark_session_status(
+                        profile=current_profile_name(),
+                        status="degraded",
+                        reason="no_matching_cdp_responses_pdp_batch",
+                    )
+                except Exception:
+                    pass
+                raise RuntimeError("No matching CDP responses captured in batch (PDP). Session marked as degraded.")
+            return out_path
+        finally:
+            try:
+                if 'tab' in locals():
+                    tab.stop()
+            except Exception:
+                pass
+            try:
+                if proc is not None:
+                    proc.terminate()
+            except Exception:
+                pass
 
+    pages_per_session = max(0, int(settings.pages_per_session))
+    if launch and pages_per_session and len(urls) > pages_per_session:
+        # Split into chunks, run multiple sessions, then merge outputs
+        chunk_paths: List[Path] = []
+        for i in range(0, len(urls), pages_per_session):
+            sub = urls[i : i + pages_per_session]
+            chunk_paths.append(_run_once(sub))
+        # Concatenate JSONL files
         data_dir = ensure_data_dir()
         ts = int(time.time())
-        out_path = data_dir / f"cdp_pdp_batch_{ts}.jsonl"
-        n = collector.dump_items_jsonl(out_path)
-        logger.info(f"Captured {n} PDP responses in batch → {out_path}")
-        return out_path
-    finally:
-        try:
-            if 'tab' in locals():
-                tab.stop()
-        except Exception:
-            pass
+        final_out = data_dir / f"cdp_pdp_batch_{ts}.jsonl"
+        with final_out.open("w", encoding="utf-8") as out:
+            for pth in chunk_paths:
+                out.write(pth.read_text(encoding="utf-8"))
+        return final_out
+    else:
+        return _run_once(urls)
 
 
 def collect_pdp_batch_concurrent(
@@ -373,70 +488,90 @@ def collect_pdp_batch_concurrent(
     patterns = [p.strip() for p in env_patterns.split(",") if p.strip()] if env_patterns else default_patterns
 
     filters = CdpFilters.from_patterns(patterns)
-    proc = start_chrome_if_requested(port, launch)
-    tabs: List = []
-    try:
-        collector = CdpCollector(port=port, filters=filters)
-        # Pre-create tabs up to concurrency
-        for _ in range(concurrency):
-            tabs.append(collector.new_tab())
+    limiter = RateLimiter(settings.requests_per_minute)
 
-        # Dispatch in batches
-        total = len(urls)
-        for i in range(0, len(urls), concurrency):
-            batch = urls[i : i + concurrency]
-            logger.info(f"Batch {i//concurrency + 1}: navigating {len(batch)} PDPs")
-            for j, u in enumerate(batch):
+    def _run_chunk(chunk_urls: List[str], chunk_index: int, total_chunks: int) -> Path:
+        proc = start_chrome_if_requested(port, launch)
+        tabs: List = []
+        try:
+            collector = CdpCollector(port=port, filters=filters)
+            for _ in range(min(concurrency, len(chunk_urls))):
+                tabs.append(collector.new_tab())
+            total = len(chunk_urls)
+            for i in range(0, len(chunk_urls), len(tabs)):
+                batch = chunk_urls[i : i + len(tabs)]
+                logger.info(f"Chunk {chunk_index}/{total_chunks} → dispatch {len(batch)}")
+                for j, u in enumerate(batch):
+                    try:
+                        limiter.acquire()
+                        logger.info(f"→ Tab {j+1}: {u}")
+                        if on_progress:
+                            on_progress(
+                                "start",
+                                {
+                                    "index": i + j + 1,
+                                    "total": total,
+                                    "url": u,
+                                    "tab": j + 1,
+                                    "batch": (i // len(tabs)) + 1,
+                                },
+                            )
+                        tabs[j].call_method("Page.navigate", url=u)
+                    except Exception as e:
+                        logger.warning(f"Failed to navigate tab {j+1} to {u}: {e}")
+                    time.sleep(max(0.0, stagger_s))
+                t0 = time.time()
+                while time.time() - t0 < timeout_s:
+                    time.sleep(0.25)
+                if on_progress:
+                    on_progress(
+                        "batch_done",
+                        {
+                            "end_index": i + len(batch),
+                            "total": total,
+                        },
+                    )
+            data_dir = ensure_data_dir()
+            ts = int(time.time())
+            out_path = data_dir / f"cdp_pdp_batch_{ts}.jsonl"
+            n = collector.dump_items_jsonl(out_path)
+            logger.info(f"Captured {n} PDP responses (concurrent) → {out_path}")
+            if n <= 0:
                 try:
-                    logger.info(f"→ Tab {j+1}: {u}")
-                    if on_progress:
-                        on_progress(
-                            "start",
-                            {
-                                "index": i + j + 1,
-                                "total": total,
-                                "url": u,
-                                "tab": j + 1,
-                                "batch": (i // concurrency) + 1,
-                            },
-                        )
-                    tabs[j].call_method("Page.navigate", url=u)
-                except Exception as e:
-                    logger.warning(f"Failed to navigate tab {j+1} to {u}: {e}")
-                time.sleep(max(0.0, stagger_s))
-            # dwell to allow API responses to arrive
-            t0 = time.time()
-            while time.time() - t0 < timeout_s:
-                time.sleep(0.25)
-            if on_progress:
-                on_progress(
-                    "batch_done",
-                    {
-                        "end_index": i + len(batch),
-                        "total": total,
-                        "batch": (i // concurrency) + 1,
-                    },
-                )
-
-        data_dir = ensure_data_dir()
-        ts = int(time.time())
-        out_path = data_dir / f"cdp_pdp_batch_{ts}.jsonl"
-        n = collector.dump_items_jsonl(out_path)
-        logger.info(f"Captured {n} PDP responses (concurrent) → {out_path}")
-        return out_path
-    finally:
-        for t in tabs:
+                    mark_session_status(
+                        profile=current_profile_name(),
+                        status="degraded",
+                        reason="no_matching_cdp_responses_pdp_concurrent",
+                    )
+                except Exception:
+                    pass
+                raise RuntimeError("No matching CDP responses captured (PDP concurrent). Session marked as degraded.")
+            return out_path
+        finally:
+            for t in tabs:
+                try:
+                    t.stop()
+                except Exception:
+                    pass
             try:
-                t.stop()
+                if proc is not None:
+                    proc.terminate()
             except Exception:
                 pass
-        try:
-            if proc is not None:
-                proc.terminate()
-        except Exception:
-            pass
-        try:
-            if proc is not None:
-                proc.terminate()
-        except Exception:
-            pass
+
+    pages_per_session = max(0, int(settings.pages_per_session))
+    if launch and pages_per_session and len(urls) > pages_per_session:
+        chunk_paths: List[Path] = []
+        total_chunks = (len(urls) + pages_per_session - 1) // pages_per_session
+        for cidx, start in enumerate(range(0, len(urls), pages_per_session), start=1):
+            chunk = urls[start : start + pages_per_session]
+            chunk_paths.append(_run_chunk(chunk, cidx, total_chunks))
+        data_dir = ensure_data_dir()
+        ts = int(time.time())
+        final_out = data_dir / f"cdp_pdp_batch_{ts}.jsonl"
+        with final_out.open("w", encoding="utf-8") as out:
+            for pth in chunk_paths:
+                out.write(pth.read_text(encoding="utf-8"))
+        return final_out
+    else:
+        return _run_chunk(urls, 1, 1)

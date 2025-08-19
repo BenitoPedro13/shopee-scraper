@@ -1,0 +1,170 @@
+# Shopee Scraper — Requisitos & Status (foco: proteção de contas)
+
+Última atualização: 2025-08-19
+
+Este documento acompanha o progresso do projeto com prioridade máxima em proteger contas durante o desenvolvimento (minimizar bans e degradação de sessão).
+
+## Prioridade Atual — Proteger Contas
+- Perfil por conta: um `user-data-dir` exclusivo por conta/sessão. Nunca reutilize perfis entre contas.
+- 1 IP por perfil: proxy residencial/móvel estável e geolocalizado. Evite trocar IP no meio da sessão (sticky session).
+- Navegador real + CDP: observar tráfego (Network.*) sem injeção JS. Manter 3P cookies, consent, Accept-Language/timezone coerentes.
+- Comportamento humano: home → busca/categoria → PDP; dwell/scroll natural e timings aleatórios.
+- Limites conservadores: ~1–2 req/s; orçamentos por minuto e pausas. Pare ao sinal de bloqueio.
+- Health-check & disjuntor: detectar login wall/CAPTCHA/layout vazio; marcar sessão “degradada” e interromper.
+- Reciclagem: reiniciar Chrome/perfil após N páginas para reduzir padrões acumulados.
+
+## Visão Rápida (Feito vs. Falta)
+
+### Concluído
+- Login manual headful com sessão persistida (`storage_state.json`).
+- Busca Playwright (scroll básico), extração de cards e export JSON/CSV.
+- CDP PDP: captura via `Network.getResponseBody` e export normalizado (JSON/CSV).
+- CDP Busca: captura de APIs de listagem e export normalizado (JSON/CSV).
+- Enriquecimento: pipeline Busca → PDP (serial e concorrente por abas).
+- Config `.env`, locale/timezone, flag para 3P cookies; diretórios e gitignore.
+- CDP + Proxy por perfil (básico): `--proxy-server` respeita `PROXY_URL`.
+- Perfis isolados (básico): suporte a `PROFILE_NAME` → `.user-data/profiles/<PROFILE_NAME>`.
+- Health-check mínimo (CDP): se 0 respostas capturadas, marca perfil como degradado em `data/session_status/<perfil>.json` e aborta.
+- Rate limiting básico (CDP): limite por minuto em navegações.
+- Reciclagem por N páginas (CDP): divisão de lotes em sessões quando `--launch`.
+- Coerência de headers/timezone (CDP): `Accept-Language` e `timezone` alinhados.
+
+### Parcial
+- Alinhamento de locale/UA/timezone (Playwright ok; CDP parcial – revisar UA e headers).
+- Deduplicação: heurística na busca; sem garantia global `(shop_id,item_id)` nas exports.
+- Modelagem de dados: ainda sem Schemas Pydantic (dicts livres).
+- Paginação CDP de busca: captura janela atual; sem rolagem/múltiplas páginas agregadas.
+- Concorrência: abas concorrentes implementadas; sem scheduler/queue/métricas estruturadas.
+
+### Pendente (prioridade entre colchetes)
+- [Alta] Proxy por perfil no CDP: (parcial) falta tratar credenciais via extensão quando necessário e sessão sticky no username.
+- [Alta] Múltiplos perfis isolados: (parcial) adicionar comandos de CLI para criar/listar/alternar perfis.
+- [Alta] Health-check & circuit breaker: (parcial) ampliar para detectar URL de CAPTCHA/login wall e estados intermediários.
+- [Alta] Rate limiting & backoff: limites por minuto/perfil, `tenacity` em 429/5xx, cooldown progressivo (parcial: rate limiting implementado; falta backoff/tenacity).
+- [Alta] Reciclagem após N páginas: fechar e relançar Chrome/perfil; reabrir com mesmo IP (parcial: reciclagem implementada em CDP quando `--launch`).
+- [Média] Schemas Pydantic (`SearchItem`, `PdpItem`) + dedup `(shop_id,item_id)` nas exports.
+- [Média] Logs estruturados (JSON) + métricas: taxa de sucesso, bans/hora, latência, erros tran. vs. fatais.
+- [Média] Paginação/scroll em CDP Busca: agregar múltiplas respostas antes de exportar.
+- [Média] Mapeamento domínio↔região/IP; verificação de coerência Accept-Language/timezone.
+- [Baixa] Persistência em banco (SQLite/Postgres) com upsert.
+- [Baixa] Integração CAPTCHA (2Captcha/Anti‑Captcha) e OTP (SMS API) com fallback manual.
+- [Baixa] Scheduler/queue (Celery/RQ) e orquestração multi-instância.
+- [Baixa] Trilho mobile (app nativo/emulador) e anti‑detect (Kameleo).
+
+## Mapa por Fase (Plano de Arquitetura)
+- Fase 1 (MVP): concluída.
+- Fase 2 (Produto/Modelo): parcial — normalização básica, falta Schemas e dedup formal.
+- Fase 3 (Resiliência): parcial — rate limiting básico e health-check mínimo; falta backoff/tenacity, métricas e disjuntor mais amplo.
+- Fase 4 (Perfis/Proxies): parcial — perfis isolados por `PROFILE_NAME` e `--proxy-server` básico; falta gestão de perfis via CLI e sticky avançado.
+- Fase 5 (CAPTCHA/OTP): pendente — somente manual.
+- Fase 6/7 (Escala/Orquestração CDP): parcial — concorrência por abas e reciclagem básica; falta scheduler/queue e métricas.
+- Fases 8–12 (Mobile, Anti‑detect, Banco, Observabilidade, Compliance): em aberto (parcial em compliance básico via .env/gitignore e limites conservadores).
+
+## Itens de Ação Detalhados (priorizados)
+
+### Alta Prioridade (proteção de contas)
+— CDP + Proxy por perfil
+  - Objetivo: isolar fingerprint e reputação por perfil/conta com IP coerente.
+  - Implementação (baixa complexidade):
+    - Em `src/shopee_scraper/cdp/collector.py`, incluir flag `--proxy-server=<proto>://host:port` em `_build_launch_cmd` quando `settings.proxy_url` estiver definido.
+    - Suporte a credenciais no próprio URL (`http://user:pass@host:port`) ou via extensão se necessário (posterior).
+    - Acrescentar variáveis por perfil (ex.: `PROFILE_NAME`, `PROFILE_PROXY_URL`) e resolver `user-data-dir` para `.user-data/profiles/<PROFILE_NAME>`.
+  - Sinais de sucesso: Chrome sai com IP correto (verificar em `https://ipecho.net/plain`), sessão permanece estável entre execuções.
+  - Riscos: proxies instáveis ou datacenter; preferir residencial/móvel.
+
+— Perfis isolados
+  - Objetivo: cada conta tem seu perfil Chrome (cookies, cache, consent) e seu IP.
+  - Implementação (baixa complexidade):
+    - Permitir `PROFILE_NAME` no `.env`; montar `settings.user_data_dir = .user-data/profiles/<PROFILE_NAME>` se presente.
+    - Adicionar comandos no CLI: `profiles create/list/use` (opcional numa segunda etapa). Primeiro passo: só respeitar `PROFILE_NAME`.
+  - Sinais de sucesso: diretórios separados por perfil; nenhuma mistura de sessão entre contas.
+
+— Health-check & circuit breaker
+  - Objetivo: parar rápido ao detectar bloqueios para proteger reputação da conta/IP.
+  - Implementação (média-baixa):
+    - Reaproveitar heurísticas de `_is_captcha_gate` (Playwright) e adicionar verificação de redirecionamentos de login/erro.
+    - Expor `on_block(event, context)` que marca sessão degradada (ex.: arquivo `data/session_degraded/<perfil>.flag`) e aborta lote.
+    - Integrar ao trilho CDP: se não capturar respostas esperadas por N segundos ou se a navegação cair em `/verify/captcha`, acionar disjuntor e encerrar.
+  - Sinais de sucesso: lotes param automaticamente; logs mostram causa e próximo passo.
+
+— Rate limiting & backoff
+  - Objetivo: reduzir a taxa de eventos e reagir a sinais de throttling.
+  - Implementação (baixa):
+    - Criar util `rate_limiter(tokens_per_minute)` simples por processo/perfil.
+    - Aplicar `tenacity` com backoff exponencial para 429/5xx nos pontos de captura (ex.: re-tentar abrir PDP/esperar respostas).
+  - Sinais de sucesso: menor incidência de bloqueios; latência previsível.
+
+— Reciclagem por N páginas
+  - Objetivo: reduzir “padrões acumulados” por longas sessões.
+  - Implementação (baixa):
+    - Contador de páginas no CLI/CDP; após `PAGES_PER_SESSION`, fechar e relançar Chrome com o mesmo perfil/IP (cooldown curto).
+  - Sinais de sucesso: estabilidade após longos lotes; queda de bloqueios tardios.
+
+### Média Prioridade
+- Schemas Pydantic + Dedup
+  - `SearchItem`, `PdpItem`; validação e normalização; dedup global `(shop_id,item_id)` na export.
+- Logs & Métricas
+  - `loguru` em JSON; contadores: sucesso/bloqueio/latência/bans/hora por perfil/IP.
+- Paginação CDP (Busca)
+  - Simular scroll/troca de página e agregar múltiplas respostas antes do export.
+- Coerência de fingerprint (CDP)
+  - Alinhar UA/Accept-Language/timezone e consent; verificar 3P cookies ativas.
+
+### Baixa Prioridade
+- Banco (SQLite/Postgres) + upsert.
+- CAPTCHA/OTP providers (fallback manual como padrão).
+- Scheduler/queue (Celery/RQ) e distribuição multi-instância.
+- Trilho mobile e anti‑detect.
+
+## Operação Segura (recomendações)
+- Uma conta por perfil de navegador e por IP; jamais compartilhe IP entre contas simultâneas.
+- Evite headless; mantenha dwell/scrolls naturais; não dispare lotes longos sem reciclar instâncias.
+- Monitore sinais de bloqueio; ao primeiro sinal, interrompa e recicle perfil/IP.
+- Não altere IP no meio da sessão; não limpe cookies entre páginas da mesma sessão.
+
+## Histórico (resumo do que já foi feito)
+- [x] Login headful e `storage_state.json` (Playwright)
+- [x] Busca e export CSV/JSON (Playwright)
+- [x] CDP PDP: captura e export
+- [x] CDP Busca: captura e export
+- [x] Enriquecimento Busca→PDP, com concorrência por abas
+- [x] Configs via `.env`; 3P cookies flag; Accept-Language/timezone (Playwright)
+- [x] Proxy por perfil no CDP (básico)
+- [x] Perfis isolados multi-conta (básico via `PROFILE_NAME`)
+- [x] Health-check mínimo (marca sessão degradada se 0 respostas)
+- [x] Rate limiting básico (por minuto)
+- [x] Reciclagem por N páginas (CDP, quando `--launch`)
+- [ ] Schemas Pydantic + dedup global
+- [ ] Logs JSON + métricas
+- [ ] Paginação CDP (Busca)
+- [ ] Banco (SQLite/Postgres) com upsert
+- [ ] CAPTCHA/OTP providers
+- [ ] Scheduler/queue (escala)
+- [ ] Trilho mobile e anti‑detect
+
+Infra de qualidade
+- [x] Testes unitários básicos (utils de IO e exportadores CDP)
+
+---
+
+Sugestão de próxima sprint (proteção de contas):
+1) Proxy por perfil (CDP) + múltiplos perfis isolados.
+2) Health-check com disjuntor + rate limiting/backoff.
+3) Reciclagem de instância após N páginas.
+
+## Como começar a implementar (atalhos)
+- Código relevante:
+  - CDP: `src/shopee_scraper/cdp/collector.py` (lançamento do Chrome, filtros, navegação, captura de bodies).
+  - Config: `src/shopee_scraper/config.py` (settings via `.env`).
+  - CLI: `cli.py` (comandos `cdp-*` e fluxo batch/concurrent).
+  - Utilitários: `src/shopee_scraper/utils.py` (delays, IO).
+- Passos práticos (proxy + perfil):
+  1) Adicionar `--proxy-server` em `_build_launch_cmd` se `settings.proxy_url` estiver definido.
+  2) Ler `PROFILE_NAME` do `.env` e ajustar `settings.user_data_dir` para `.user-data/profiles/<PROFILE_NAME>` se presente.
+  3) Testar manualmente com `python cli.py cdp-login` (ver IP) e depois `cdp-search` em baixo volume.
+- Passos práticos (health-check):
+  1) Encapsular heurísticas de bloqueio (captcha/login wall) e expor `is_degraded()`.
+  2) Em fluxos `cdp-*`, se `is_degraded()` → encerrar lote, escrever flag e logar causa.
+- Passos práticos (rate limiting/backoff):
+  1) Implementar um `RateLimiter` simples (token bucket ou sleep por janela).
+  2) Decorar pontos de navegação/captura com `tenacity` para 429/5xx.

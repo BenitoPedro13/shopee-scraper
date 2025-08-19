@@ -19,6 +19,7 @@ storage_state.json
 # Data outputs
 data/
 !data/.gitkeep
+/docs/PROXIES_BRIGHTDATA.txt
 
 # Playwright
 playwright-report/

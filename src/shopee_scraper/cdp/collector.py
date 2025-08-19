@@ -494,6 +494,114 @@ def collect_search_once(keyword: str, launch: bool = False, timeout_s: float = 2
             pass
 
 
+def collect_search_paged(
+    keyword: str,
+    pages: int = 3,
+    start_page: int = 0,
+    *,
+    launch: bool = False,
+    timeout_s: float = 10.0,
+    pause_s: float = 0.5,
+) -> Path:
+    """Capture search/listing API responses across multiple pages using the `page` query parameter.
+
+    Returns a single JSONL file with all captured records.
+    """
+    import urllib.parse as _url
+
+    if pages <= 0:
+        raise ValueError("pages must be >= 1")
+
+    port = int(os.environ.get("CDP_PORT", "9222"))
+    default_patterns = [
+        r"/api/v4/search/",
+        r"/api/v2/search_items",
+        r"/api/v4/recommend/",
+    ]
+    env_patterns = os.environ.get("CDP_FILTER_PATTERNS")
+    patterns = [p.strip() for p in env_patterns.split(",") if p.strip()] if env_patterns else default_patterns
+
+    filters = CdpFilters.from_patterns(patterns)
+    limiter = RateLimiter(settings.requests_per_minute)
+
+    q = _url.quote_plus(keyword)
+
+    proc = start_chrome_if_requested(port, launch)
+    try:
+        configure_json_logging()
+        collector = CdpCollector(port=port, filters=filters)
+        tab = collector.new_tab()
+        total_pages = pages
+        session_t0 = time.time()
+        for idx in range(start_page, start_page + pages):
+            limiter.acquire()
+            search_url = f"https://{settings.shopee_domain}/search?keyword={q}&page={idx}"
+            logger.info(f"Navigating to Search page={idx}: {search_url}")
+            for attempt in Retrying(
+                stop=stop_after_attempt(3),
+                wait=wait_exponential(multiplier=0.5, min=0.5, max=4) + wait_random(0, 0.5),
+                retry=retry_if_exception_type(Exception),
+                reraise=True,
+            ):
+                with attempt:
+                    tab.call_method("Page.navigate", url=search_url)
+                    collector._counters["navigate_attempts"] += 1
+            t0 = time.time()
+            while time.time() - t0 < timeout_s:
+                time.sleep(0.25)
+                if (time.time() - t0) > 3.0:
+                    reason = collector.should_trip_circuit(inactivity_s=6.0)
+                    if reason:
+                        log_event("circuit_trip", context="search_paged", reason=reason, page=idx)
+                        try:
+                            mark_session_status(
+                                profile=current_profile_name(),
+                                status="degraded",
+                                reason=reason,
+                            )
+                        except Exception:
+                            pass
+                        raise RuntimeError(f"Circuit breaker tripped (Search paged p={idx}): {reason}")
+            time.sleep(max(0.0, pause_s))
+
+        data_dir = ensure_data_dir()
+        ts = int(time.time())
+        out_path = data_dir / f"cdp_search_batch_{ts}.jsonl"
+        n = collector.dump_items_jsonl(out_path)
+        logger.info(f"Captured {n} matching responses across {total_pages} pages → {out_path}")
+        log_event(
+            "cdp_capture_summary",
+            context="search_paged",
+            captured=n,
+            pages=total_pages,
+            duration_s=round(time.time() - session_t0, 3),
+            counters=collector._counters,
+            output=str(out_path),
+        )
+        if n <= 0:
+            try:
+                mark_session_status(
+                    profile=current_profile_name(),
+                    status="degraded",
+                    reason="no_matching_cdp_responses_search_paged",
+                )
+            except Exception:
+                pass
+            raise RuntimeError("No matching CDP responses captured (Search paged). Session marked as degraded.")
+        return out_path
+    finally:
+        try:
+            if 'tab' in locals():
+                tab.stop()
+        except Exception:
+            pass
+        try:
+            if proc is not None:
+                proc.terminate()
+        except Exception:
+            pass
+
+
 def launch_chrome_for_login(timeout_open_s: Optional[float] = None, port: Optional[int] = None) -> None:
     """Launch a real Chrome with the project user-data dir and remote debugging enabled.
 

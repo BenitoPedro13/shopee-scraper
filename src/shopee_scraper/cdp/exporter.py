@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from loguru import logger
 
 from ..utils import ensure_data_dir, write_csv, write_json
+from ..schemas import SearchItem, PdpItem, deduplicate_models
 from ..config import settings
 
 
@@ -57,7 +58,7 @@ def _normalize_price(item: dict) -> Tuple[Optional[int], Optional[int]]:
     return None, None
 
 
-def normalize_pdp_record(body_json: dict, page_url: str, status: Optional[int]) -> Optional[Dict[str, Any]]:
+def normalize_pdp_record(body_json: dict, page_url: str, status: Optional[int]) -> Optional[PdpItem]:
     data = body_json.get("data") if isinstance(body_json, dict) else None
     if not isinstance(data, dict):
         return None
@@ -84,21 +85,24 @@ def normalize_pdp_record(body_json: dict, page_url: str, status: Optional[int]) 
 
     price_min, price_max = _normalize_price(item)
 
-    row: Dict[str, Any] = {
-        "item_id": item_id,
-        "shop_id": shop_id,
-        "title": title,
-        "currency": currency,
-        "price_min": price_min,
-        "price_max": price_max,
-        "rating_star": rating,
-        "shop_location": shop_location,
-        "category_path": cat_path,
-        "first_image": first_image,
-        "source_url": page_url,
-        "status": status,
-    }
-    return row
+    try:
+        return PdpItem(
+            item_id=item_id,
+            shop_id=shop_id,
+            title=title,
+            currency=currency,
+            price_min=price_min,
+            price_max=price_max,
+            rating_star=rating,
+            shop_location=shop_location,
+            category_path=cat_path,
+            first_image=first_image,
+            source_url=page_url,
+            status=status,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to build PdpItem: {e}")
+        return None
 
 
 def export_pdp_from_jsonl(jsonl_path: Path) -> Tuple[Path, Path, List[Dict[str, Any]]]:
@@ -106,7 +110,7 @@ def export_pdp_from_jsonl(jsonl_path: Path) -> Tuple[Path, Path, List[Dict[str, 
 
     Returns (json_out_path, csv_out_path, rows)
     """
-    rows: List[Dict[str, Any]] = []
+    models: List[PdpItem] = []
     with jsonl_path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -126,9 +130,15 @@ def export_pdp_from_jsonl(jsonl_path: Path) -> Tuple[Path, Path, List[Dict[str, 
             parsed = _loads_body(body, base64_flag)
             if not parsed:
                 continue
-            row = normalize_pdp_record(parsed, page_url=page_url, status=status)
-            if row:
-                rows.append(row)
+            row_model = normalize_pdp_record(parsed, page_url=page_url, status=status)
+            if row_model:
+                models.append(row_model)
+
+    # Deduplicate by (shop_id, item_id)
+    models = deduplicate_models(models)
+
+    # Serialize to rows
+    rows: List[Dict[str, Any]] = [m.model_dump() for m in models]
 
     data_dir = ensure_data_dir()
     stem = jsonl_path.stem  # e.g., cdp_pdp_12345
@@ -156,7 +166,7 @@ def _find_search_items(payload: Any) -> List[dict]:
     return []
 
 
-def _normalize_search_item(entry: dict) -> Dict[str, Any]:
+def _normalize_search_item(entry: dict) -> SearchItem:
     base = entry.get("item_basic") if isinstance(entry.get("item_basic"), dict) else entry
     item_id = base.get("itemid") or base.get("item_id")
     shop_id = base.get("shopid") or base.get("shop_id")
@@ -171,21 +181,21 @@ def _normalize_search_item(entry: dict) -> Dict[str, Any]:
     if shop_id and item_id:
         url = f"https://{settings.shopee_domain}/product/{shop_id}/{item_id}"
 
-    return {
-        "item_id": item_id,
-        "shop_id": shop_id,
-        "title": title,
-        "currency": currency,
-        "price_min": price_min,
-        "price_max": price_max,
-        "sold": sold,
-        "shop_location": shop_location,
-        "url": url,
-    }
+    return SearchItem(
+        item_id=item_id,
+        shop_id=shop_id,
+        title=title,
+        currency=currency,
+        price_min=price_min,
+        price_max=price_max,
+        sold=sold,
+        shop_location=shop_location,
+        url=url,
+    )
 
 
 def export_search_from_jsonl(jsonl_path: Path) -> Tuple[Path, Path, List[Dict[str, Any]]]:
-    rows: List[Dict[str, Any]] = []
+    models: List[SearchItem] = []
     with jsonl_path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -205,7 +215,15 @@ def export_search_from_jsonl(jsonl_path: Path) -> Tuple[Path, Path, List[Dict[st
                 continue
             items = _find_search_items(parsed)
             for it in items:
-                rows.append(_normalize_search_item(it))
+                try:
+                    models.append(_normalize_search_item(it))
+                except Exception as e:
+                    logger.warning(f"Skipping invalid search item: {e}")
+
+    # Deduplicate by (shop_id, item_id)
+    models = deduplicate_models(models)
+
+    rows: List[Dict[str, Any]] = [m.model_dump() for m in models]
 
     data_dir = ensure_data_dir()
     stem = jsonl_path.stem  # e.g., cdp_search_12345

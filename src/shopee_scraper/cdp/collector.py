@@ -588,6 +588,132 @@ def collect_search_paged(
             except Exception:
                 pass
             raise RuntimeError("No matching CDP responses captured (Search paged). Session marked as degraded.")
+    return out_path
+    finally:
+        try:
+            if 'tab' in locals():
+                tab.stop()
+        except Exception:
+            pass
+        try:
+            if proc is not None:
+                proc.terminate()
+        except Exception:
+            pass
+
+
+def collect_search_all(
+    keyword: str,
+    *,
+    launch: bool = False,
+    timeout_s: float = 10.0,
+    pause_s: float = 0.5,
+    start_page: int = 0,
+    max_pages: int = 100,
+    stop_after_empty_pages: int = 2,
+) -> Path:
+    """Capture search/listing APIs across pages until no new matches for N consecutive pages.
+
+    Safety limits: `max_pages` upper bound and `stop_after_empty_pages` to prevent infinite loops.
+    Returns a single JSONL file with all captured records.
+    """
+    import urllib.parse as _url
+
+    if max_pages <= 0:
+        raise ValueError("max_pages must be >= 1")
+    if stop_after_empty_pages <= 0:
+        stop_after_empty_pages = 1
+
+    port = int(os.environ.get("CDP_PORT", "9222"))
+    default_patterns = [
+        r"/api/v4/search/",
+        r"/api/v2/search_items",
+        r"/api/v4/recommend/",
+    ]
+    env_patterns = os.environ.get("CDP_FILTER_PATTERNS")
+    patterns = [p.strip() for p in env_patterns.split(",") if p.strip()] if env_patterns else default_patterns
+
+    filters = CdpFilters.from_patterns(patterns)
+    limiter = RateLimiter(settings.requests_per_minute)
+
+    q = _url.quote_plus(keyword)
+
+    proc = start_chrome_if_requested(port, launch)
+    try:
+        configure_json_logging()
+        collector = CdpCollector(port=port, filters=filters)
+        tab = collector.new_tab()
+        pages_visited = 0
+        empty_streak = 0
+        session_t0 = time.time()
+        for page_idx in range(start_page, start_page + max_pages):
+            limiter.acquire()
+            before = len(collector._items)
+            search_url = f"https://{settings.shopee_domain}/search?keyword={q}&page={page_idx}"
+            logger.info(f"Navigating to Search page={page_idx}: {search_url}")
+            for attempt in Retrying(
+                stop=stop_after_attempt(3),
+                wait=wait_exponential(multiplier=0.5, min=0.5, max=4) + wait_random(0, 0.5),
+                retry=retry_if_exception_type(Exception),
+                reraise=True,
+            ):
+                with attempt:
+                    tab.call_method("Page.navigate", url=search_url)
+                    collector._counters["navigate_attempts"] += 1
+            t0 = time.time()
+            while time.time() - t0 < timeout_s:
+                time.sleep(0.25)
+                if (time.time() - t0) > 3.0:
+                    reason = collector.should_trip_circuit(inactivity_s=6.0)
+                    if reason:
+                        log_event("circuit_trip", context="search_all", reason=reason, page=page_idx)
+                        try:
+                            mark_session_status(
+                                profile=current_profile_name(),
+                                status="degraded",
+                                reason=reason,
+                            )
+                        except Exception:
+                            pass
+                        raise RuntimeError(f"Circuit breaker tripped (Search all p={page_idx}): {reason}")
+            time.sleep(max(0.0, pause_s))
+
+            after = len(collector._items)
+            delta = max(0, after - before)
+            pages_visited += 1
+            log_event("search_page_captured", page=page_idx, delta=delta)
+            if delta == 0:
+                empty_streak += 1
+            else:
+                empty_streak = 0
+            if empty_streak >= stop_after_empty_pages:
+                logger.info(f"No new matches for {empty_streak} pages; stopping at page {page_idx}.")
+                break
+
+        data_dir = ensure_data_dir()
+        ts = int(time.time())
+        out_path = data_dir / f"cdp_search_batch_{ts}.jsonl"
+        n = collector.dump_items_jsonl(out_path)
+        logger.info(f"Captured {n} matching responses across {pages_visited} pages → {out_path}")
+        log_event(
+            "cdp_capture_summary",
+            context="search_all",
+            captured=n,
+            pages=pages_visited,
+            duration_s=round(time.time() - session_t0, 3),
+            counters=collector._counters,
+            output=str(out_path),
+        )
+        if n <= 0:
+            try:
+                mark_session_status(
+                    profile=current_profile_name(),
+                    status="degraded",
+                    reason="no_matching_cdp_responses_search_all",
+                )
+            except Exception:
+                pass
+            raise RuntimeError("No matching CDP responses captured (Search all). Session marked as degraded.")
         return out_path
     finally:
         try:

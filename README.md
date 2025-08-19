@@ -58,6 +58,13 @@ python cli.py env-validate             # valida perfil/proxy/domínio/locale/tim
 python cli.py profiles list            # lista perfis disponíveis e o ativo
 python cli.py profiles create br_01    # cria diretório do perfil
 python cli.py profiles use br_01       # define PROFILE_NAME no .env
+python cli.py metrics summary          # resumo de métricas a partir de data/logs/events.jsonl
+python cli.py metrics summary --hours 24 --profile br_01  # janela/filters
+python cli.py metrics export           # exporta CSV/JSON de agregações para gráficos/notebooks
+python cli.py queue add-search -k "batman" -p 5  # agenda uma busca paginada
+python cli.py queue add-enrich --concurrency 6 --per-timeout 12  # agenda um enriquecimento
+python cli.py queue list               # lista tarefas na fila
+python cli.py queue run --max-tasks 5  # executa algumas tarefas pendentes
 python cli.py login
 python cli.py cdp-login  # login em Chrome real (perfil CDP)
 python cli.py search --keyword "fones bluetooth"
@@ -76,6 +83,7 @@ python cli.py cdp-search --keyword "brinquedo para cachorro" --no-launch --no-ex
 python cli.py cdp-search --keyword "brinquedo para cachorro" -p 5 --timeout 12  # paginação: 5 páginas (page=0..4)
 python cli.py cdp-search --keyword "brinquedo para cachorro" -p 3 --start-page 2  # começa da página 2 (2..4)
 python cli.py cdp-search --keyword "brinquedo para cachorro" --all-pages --timeout 10  # paginar até o fim (com limite de segurança)
+python cli.py cdp-search -k "batman" --soft-circuit --circuit-inactivity 12  # ignora abort imediato e amplia janela de inatividade
 
 # Enriquecer export de busca com dados reais de PDP (lote):
 python cli.py cdp-enrich-search  --launch  # usa o export mais recente e roda PDP em lote
@@ -83,6 +91,7 @@ python cli.py cdp-enrich-search  --launch  # usa o export mais recente e roda PD
 # 1) Abra uma sessão única autenticada no proxy: python cli.py cdp-login
 # 2) Rode os lotes anexando à mesma instância: python cli.py cdp-enrich-search --no-launch
 python cli.py cdp-enrich-search data/cdp_search_17555_export.json --launch --per-timeout 12 --pause 0.6
+python cli.py cdp-enrich-search --soft-circuit --circuit-inactivity 12  # modo mais tolerante a inatividade/bloqueio
 ```
 Notas:
 - `search` serve para descoberta básica; a coleta robusta de dados usa CDP nas PDPs.
@@ -102,6 +111,19 @@ Notas:
 - Backoff: re-tentativas exponenciais com jitter para `Page.navigate`, `Network.getResponseBody` e enable de domínios CDP.
 - Cooldown: pausa aleatória entre sessões quando há reciclagem por `PAGES_PER_SESSION`.
 - Logs JSON: eventos e métricas mínimas gravados em `data/logs/events.jsonl` (inclui counters como navegações, matches, bloqueios e duração por execução).
+
+## Tuning de Concorrência & Disjuntor
+- Concorrência máxima: limite pelo CLI (`--concurrency`) e por env `CDP_MAX_CONCURRENCY` (padrão 12 via `.env`).
+- Tempo por aba: ajuste `--per-timeout` (PDP batch) ou `--timeout` (Busca/CDP).
+- Stagger: use `--stagger` (ex.: 0.8–1.0s) para reduzir bursts.
+- Disjuntor: por padrão aborta em bloqueios/inatividade; pode ser suavizado por env:
+  - `CDP_INACTIVITY_S` (padrão 8.0) — janela de inatividade antes de sinalizar bloqueio.
+  - `CDP_CIRCUIT_ENABLED` (true/false) — desliga abort imediato (soft mode; apenas loga e segue).
+
+## Métricas estruturadas
+- Relatórios: `python cli.py metrics summary [--hours N] [--profile X] [--proxy URL]`.
+- Métricas: taxa de sucesso por execução, média de duração, bloqueios (razões) e contadores (navegações, páginas), por perfil/proxy e geral.
+- Export: `python cli.py metrics export` gera `data/metrics/summary.csv` e `summary.json`. Veja `docs/metrics_example.ipynb` para gráficos rápidos (pandas/matplotlib).
 
 ## Busca paginada (valor e limites)
 - Valor: maior cobertura (long-tail), menos viés da 1ª página e mais URLs de PDP para enriquecer.

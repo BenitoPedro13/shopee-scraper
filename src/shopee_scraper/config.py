@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     )
     disable_3pc_phaseout: bool = Field(True, alias="DISABLE_3PC_PHASEOUT")
 
+    # CDP tuning
+    cdp_inactivity_s: float = Field(8.0, alias="CDP_INACTIVITY_S")
+    cdp_circuit_enabled: bool = Field(True, alias="CDP_CIRCUIT_ENABLED")
+    cdp_max_concurrency: int = Field(12, alias="CDP_MAX_CONCURRENCY")
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     def model_post_init(self, __context) -> None:  # pydantic v2 hook

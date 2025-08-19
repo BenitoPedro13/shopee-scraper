@@ -35,13 +35,14 @@ Este documento acompanha o progresso do projeto com prioridade máxima em proteg
 - Paginação CDP de busca (via parâmetro `page` + `--all-pages`).
 - CLI de perfis (básico): `profiles list/create/use` com atualização do `.env`.
 - Validação de ambiente (domínio/locale/timezone/proxy/perfil) via `env-validate`.
+- Tuning de circuito/concorrência (CDP): `CDP_INACTIVITY_S`, `CDP_CIRCUIT_ENABLED` (soft-circuit), `CDP_MAX_CONCURRENCY`; espera ajustada por `stagger`.
 
 ### Parcial
 - Alinhamento de locale/UA/timezone (Playwright ok; CDP parcial – revisar UA e headers).
 - Deduplicação: agora global por `(shop_id,item_id)` nas exports (PDP e Busca).
 - Modelagem de dados: Schemas Pydantic aplicados a PDP/Busca.
 - Scroll de busca (CDP): carregar mais itens sem trocar `page` (UX com scroll infinito) — opcional/pendente.
-- Concorrência: abas concorrentes implementadas; sem scheduler/queue/métricas estruturadas.
+- Concorrência: abas concorrentes implementadas; sem scheduler/queue; métricas estruturadas básicas via CLI.
 
 ### Backlog Priorizado (necessidade → menor; em cada nível: menor esforço → maior)
 
@@ -110,8 +111,7 @@ Nível 3 — Oportunidade (Baixa necessidade)
   - Sinais de sucesso: estabilidade após longos lotes; queda de bloqueios tardios.
 
 ### Média Prioridade
-- Métricas estruturadas
-  - Agregações e painéis (além do JSONL), contadores consolidados por perfil/IP e janelas de tempo.
+- Métricas estruturadas: agregações/relatório via CLI (`metrics summary`) e export (`metrics export`); notebook simples em `docs/metrics_example.ipynb`. Painel visual dedicado ainda pendente.
 - Paginação CDP (Busca)
   - Simular scroll/troca de página e agregar múltiplas respostas antes do export.
 - Coerência de fingerprint (CDP)
@@ -120,7 +120,7 @@ Nível 3 — Oportunidade (Baixa necessidade)
 ### Baixa Prioridade
 - Banco (SQLite/Postgres) + upsert.
 - CAPTCHA/OTP providers (fallback manual como padrão).
-- Scheduler/queue (Celery/RQ) e distribuição multi-instância.
+- Scheduler/queue (básico entregue; futuro: Celery/RQ e distribuição multi-instância).
 - Trilho mobile e anti‑detect.
 
 ## Operação Segura (recomendações)
@@ -145,6 +145,8 @@ Nível 3 — Oportunidade (Baixa necessidade)
 - [x] Schemas Pydantic + dedup global
 - [x] Paginação CDP (Busca) via parâmetro `page`
 - [x] CLI de perfis (list/create/use) + validação de ambiente
+- [x] Métricas estruturadas básicas via CLI (summary por perfil/proxy)
+- [x] Fila local e scheduler simples via CLI (`queue add-*`, `queue run`, `queue list`)
 - [ ] Scroll (Busca) via CDP
 - [ ] Banco (SQLite/Postgres) com upsert
 - [ ] CAPTCHA/OTP providers

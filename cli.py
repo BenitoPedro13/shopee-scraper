@@ -20,10 +20,15 @@ from src.shopee_scraper.cdp.exporter import (
 )
 from src.shopee_scraper.config import settings
 from src.shopee_scraper.envcheck import validate_environment, suggest_region_for_domain
+from src.shopee_scraper.scheduler import add_task as queue_add_task, load_tasks as queue_load_tasks, run_once as queue_run_once
 
 app = typer.Typer(help="Shopee Scraper CLI (MVP scaffolding)")
 profiles_app = typer.Typer(help="Gerenciar perfis de navegador (CDP)")
 app.add_typer(profiles_app, name="profiles")
+metrics_app = typer.Typer(help="Relatórios a partir de data/logs/events.jsonl")
+app.add_typer(metrics_app, name="metrics")
+queue_app = typer.Typer(help="Fila local de tarefas (scheduler simples)")
+app.add_typer(queue_app, name="queue")
 console = Console()
 
 
@@ -48,13 +53,85 @@ def cdp_pdp(
     url: str = typer.Argument(..., help="URL completa de uma PDP de produto da Shopee"),
     launch: bool = typer.Option(True, "--launch/--no-launch", help="Lança o Chrome com porta de debug (usa USER_DATA_DIR)"),
     timeout: float = typer.Option(20.0, "--timeout", help="Tempo de captura após a navegação (s)"),
+    soft_circuit: bool = typer.Option(False, "--soft-circuit/--hard-circuit", help="Não aborta em bloqueio; apenas loga e segue (soft)"),
+    circuit_inactivity: float = typer.Option(None, "--circuit-inactivity", help="Janela de inatividade (s) para sinalizar bloqueio"),
 ):
     """Captura respostas de API de PDP via CDP e salva em JSONL (data/)."""
     try:
+        # Optional overrides for circuit behaviour
+        if soft_circuit:
+            from src.shopee_scraper.config import settings as _s
+            _s.cdp_circuit_enabled = False
+        if circuit_inactivity is not None:
+            from src.shopee_scraper.config import settings as _s
+            _s.cdp_inactivity_s = float(circuit_inactivity)
         out = collect_pdp_once(url=url, launch=launch, timeout_s=timeout)
         console.print(f"[green]OK[/]: respostas capturadas em {out}")
     except Exception as e:
         console.print(f"[red]Erro[/]: {e}")
+
+
+# ------------------------------ Queue CLI ------------------------------
+
+@queue_app.command("add-search")
+def queue_add_search(
+    keyword: str = typer.Option(..., "--keyword", "-k"),
+    pages: int = typer.Option(1, "--pages", "-p"),
+    start_page: int = typer.Option(0, "--start-page"),
+    all_pages: bool = typer.Option(False, "--all-pages/--no-all-pages"),
+    timeout: float = typer.Option(20.0, "--timeout"),
+    launch: bool = typer.Option(True, "--launch/--no-launch"),
+    auto_export: bool = typer.Option(True, "--export/--no-export"),
+):
+    kind = "cdp_search_all" if all_pages else "cdp_search"
+    params = dict(keyword=keyword, pages=pages, start_page=start_page, timeout_s=timeout, launch=launch, auto_export=auto_export)
+    t = queue_add_task(kind, params)
+    console.print(f"[green]OK[/]: task {t.kind} adicionada id={t.id}")
+
+
+@queue_app.command("add-enrich")
+def queue_add_enrich(
+    input_path: str = typer.Option(None, "--input"),
+    launch: bool = typer.Option(True, "--launch/--no-launch"),
+    timeout: float = typer.Option(8.0, "--per-timeout"),
+    pause: float = typer.Option(0.5, "--pause"),
+    concurrency: int = typer.Option(0, "--concurrency"),
+    stagger: float = typer.Option(1.0, "--stagger"),
+):
+    params = dict(input_path=input_path, launch=launch, timeout_s=timeout, pause_s=pause, concurrency=concurrency, stagger_s=stagger)
+    t = queue_add_task("cdp_enrich", params)
+    console.print(f"[green]OK[/]: task {t.kind} adicionada id={t.id}")
+
+
+@queue_app.command("list")
+def queue_list():
+    tasks = queue_load_tasks()
+    if not tasks:
+        console.print("Nenhuma tarefa na fila.")
+        return
+    from rich.table import Table
+    tbl = Table(title="Queue Tasks")
+    for col in ("id","kind","status","attempts","max","created","updated"):
+        tbl.add_column(col)
+    for t in tasks:
+        tbl.add_row(t.id, t.kind, t.status, str(t.attempts), str(t.max_attempts), time_fmt(t.created_ts), time_fmt(t.updated_ts))
+    console.print(tbl)
+
+
+def time_fmt(ts: int) -> str:
+    try:
+        import datetime as _dt
+        return _dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(ts)
+
+
+@queue_app.command("run")
+def queue_run(
+    max_tasks: int = typer.Option(0, "--max-tasks", help="Limita quantas tarefas executar nesta rodada (0 = todas)"),
+):
+    tried = queue_run_once(max_tasks=max_tasks)
+    console.print(f"[green]OK[/]: processadas {tried} tarefas (pending → running → done/requeue)")
 
 
 @app.command("cdp-export")
@@ -186,6 +263,45 @@ def env_validate():
         )
 
 
+# ------------------------------ Metrics CLI ------------------------------
+
+@metrics_app.command("summary")
+def metrics_summary(
+    path: str = typer.Option("data/logs/events.jsonl", "--path", help="Arquivo JSONL de eventos (loguru serialize)"),
+    hours: int = typer.Option(0, "--hours", help="Janela em horas (0 = tudo)"),
+    profile: str = typer.Option(None, "--profile", help="Filtrar por PROFILE_NAME"),
+    proxy: str = typer.Option(None, "--proxy", help="Filtrar por PROXY_URL"),
+):
+    """Mostra taxa de sucesso, latência e bloqueios por perfil/proxy."""
+    from src.shopee_scraper.metrics import run_report
+
+    try:
+        run_report(Path(path), hours=hours, profile=profile, proxy=proxy)
+    except Exception as e:
+        console.print(f"[red]Erro[/]: {e}")
+
+
+@metrics_app.command("export")
+def metrics_export(
+    path: str = typer.Option("data/logs/events.jsonl", "--path", help="Arquivo JSONL de eventos (loguru serialize)"),
+    hours: int = typer.Option(0, "--hours", help="Janela em horas (0 = tudo)"),
+    profile: str = typer.Option(None, "--profile", help="Filtrar por PROFILE_NAME"),
+    proxy: str = typer.Option(None, "--proxy", help="Filtrar por PROXY_URL"),
+    out_csv: str = typer.Option("data/metrics/summary.csv", "--out-csv", help="Caminho do CSV de saída"),
+    out_json: str = typer.Option("data/metrics/summary.json", "--out-json", help="Caminho do JSON de saída"),
+):
+    """Exporta agregações para CSV/JSON (para gráficos/notebooks)."""
+    from src.shopee_scraper.metrics import export_metrics
+
+    try:
+        csv_path, json_path = export_metrics(
+            Path(path), hours=hours, profile=profile, proxy=proxy, out_csv=Path(out_csv), out_json=Path(out_json)
+        )
+        console.print(f"[green]OK[/]: métricas exportadas → {csv_path}, {json_path}")
+    except Exception as e:
+        console.print(f"[red]Erro[/]: {e}")
+
+
 @app.command("cdp-search")
 def cdp_search(
     keyword: str = typer.Option(..., "--keyword", "-k", help="Palavra-chave da busca"),
@@ -195,10 +311,20 @@ def cdp_search(
     start_page: int = typer.Option(0, "--start-page", help="Página inicial (0 = primeira)"),
     all_pages: bool = typer.Option(False, "--all-pages/--no-all-pages", help="Paginar até o fim (para quando não houver novas respostas)"),
     max_pages: int = typer.Option(100, "--max-pages", help="Limite superior de páginas no modo --all-pages"),
+    soft_circuit: bool = typer.Option(False, "--soft-circuit/--hard-circuit", help="Não aborta em bloqueio; apenas loga e segue (soft)"),
+    circuit_inactivity: float = typer.Option(None, "--circuit-inactivity", help="Janela de inatividade (s) para sinalizar bloqueio"),
     auto_export: bool = typer.Option(True, "--export/--no-export", help="Exporta JSON/CSV após capturar"),
 ):
     """Captura APIs de busca via CDP e (opcional) exporta resultados normalizados."""
     try:
+        # Optional overrides for circuit behaviour
+        if soft_circuit:
+            from src.shopee_scraper.config import settings as _s
+            _s.cdp_circuit_enabled = False
+        if circuit_inactivity is not None:
+            from src.shopee_scraper.config import settings as _s
+            _s.cdp_inactivity_s = float(circuit_inactivity)
+
         if all_pages:
             jsonl = collect_search_all(
                 keyword=keyword,
@@ -238,6 +364,8 @@ def cdp_enrich_search(
     fraction: float = typer.Option(0.25, "--fraction", min=0.0, max=1.0, help="Fraçao do total para rodar em paralelo (0..1). Ex.: 0.25 = 1/4"),
     concurrency: int = typer.Option(0, "--concurrency", help="Força um número fixo de abas (sobrepõe --fraction se > 0)"),
     stagger: float = typer.Option(1.0, "--stagger", help="Atraso entre abas no disparo de cada lote (s)"),
+    soft_circuit: bool = typer.Option(False, "--soft-circuit/--hard-circuit", help="Não aborta em bloqueio; apenas loga e segue (soft)"),
+    circuit_inactivity: float = typer.Option(None, "--circuit-inactivity", help="Janela de inatividade (s) para sinalizar bloqueio"),
 ):
     """Enriquece uma exportação de busca com dados reais de PDP via CDP (batch)."""
     try:
@@ -276,6 +404,14 @@ def cdp_enrich_search(
         urls = [r.get("url") for r in search_rows if r.get("url")]
         if not urls:
             raise ValueError("Nenhuma URL de produto encontrada no export de busca.")
+
+        # Optional overrides for circuit behaviour
+        if soft_circuit:
+            from src.shopee_scraper.config import settings as _s
+            _s.cdp_circuit_enabled = False
+        if circuit_inactivity is not None:
+            from src.shopee_scraper.config import settings as _s
+            _s.cdp_inactivity_s = float(circuit_inactivity)
 
         # Choose concurrency
         import math

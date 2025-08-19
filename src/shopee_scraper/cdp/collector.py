@@ -250,6 +250,11 @@ class CdpCollector:
             with attempt:
                 tab.call_method("Network.enable")
                 tab.call_method("Page.enable")
+        # Reduce cache effects to force observable network events
+        try:
+            tab.call_method("Network.setCacheDisabled", cacheDisabled=True)
+        except Exception:
+            pass
         # Align headers/timezone
         try:
             al = _accept_language_header(settings.locale)
@@ -352,7 +357,7 @@ def collect_pdp_once(url: str, launch: bool = False, timeout_s: float = 20.0) ->
         while time.time() - t0 < timeout_s:
             time.sleep(0.25)
             if (time.time() - t0) > 3.0:
-                reason = collector.should_trip_circuit(inactivity_s=6.0)
+                reason = collector.should_trip_circuit(inactivity_s=settings.cdp_inactivity_s)
                 if reason:
                     log_event("circuit_trip", context="pdp_once", reason=reason)
                     try:
@@ -363,7 +368,11 @@ def collect_pdp_once(url: str, launch: bool = False, timeout_s: float = 20.0) ->
                         )
                     except Exception:
                         pass
-                    raise RuntimeError(f"Circuit breaker tripped (PDP): {reason}")
+                    if settings.cdp_circuit_enabled:
+                        raise RuntimeError(f"Circuit breaker tripped (PDP): {reason}")
+                    else:
+                        logger.warning(f"Circuit signal ignored (soft mode): {reason}")
+                        break
 
         # Persist results
         data_dir = ensure_data_dir()
@@ -444,7 +453,7 @@ def collect_search_once(keyword: str, launch: bool = False, timeout_s: float = 2
         while time.time() - t0 < timeout_s:
             time.sleep(0.25)
             if (time.time() - t0) > 3.0:
-                reason = collector.should_trip_circuit(inactivity_s=6.0)
+                reason = collector.should_trip_circuit(inactivity_s=settings.cdp_inactivity_s)
                 if reason:
                     log_event("circuit_trip", context="search_once", reason=reason)
                     try:
@@ -455,7 +464,11 @@ def collect_search_once(keyword: str, launch: bool = False, timeout_s: float = 2
                         )
                     except Exception:
                         pass
-                    raise RuntimeError(f"Circuit breaker tripped (Search): {reason}")
+                    if settings.cdp_circuit_enabled:
+                        raise RuntimeError(f"Circuit breaker tripped (Search): {reason}")
+                    else:
+                        logger.warning(f"Circuit signal ignored (soft mode): {reason}")
+                        break
 
         data_dir = ensure_data_dir()
         ts = int(time.time())
@@ -550,7 +563,7 @@ def collect_search_paged(
             while time.time() - t0 < timeout_s:
                 time.sleep(0.25)
                 if (time.time() - t0) > 3.0:
-                    reason = collector.should_trip_circuit(inactivity_s=6.0)
+                    reason = collector.should_trip_circuit(inactivity_s=settings.cdp_inactivity_s)
                     if reason:
                         log_event("circuit_trip", context="search_paged", reason=reason, page=idx)
                         try:
@@ -561,7 +574,11 @@ def collect_search_paged(
                             )
                         except Exception:
                             pass
-                        raise RuntimeError(f"Circuit breaker tripped (Search paged p={idx}): {reason}")
+                        if settings.cdp_circuit_enabled:
+                            raise RuntimeError(f"Circuit breaker tripped (Search paged p={idx}): {reason}")
+                        else:
+                            logger.warning(f"Circuit signal ignored (soft mode): {reason}")
+                            break
             time.sleep(max(0.0, pause_s))
 
         data_dir = ensure_data_dir()
@@ -588,7 +605,7 @@ def collect_search_paged(
             except Exception:
                 pass
             raise RuntimeError("No matching CDP responses captured (Search paged). Session marked as degraded.")
-    return out_path
+        return out_path
     finally:
         try:
             if 'tab' in locals():
@@ -664,7 +681,7 @@ def collect_search_all(
             while time.time() - t0 < timeout_s:
                 time.sleep(0.25)
                 if (time.time() - t0) > 3.0:
-                    reason = collector.should_trip_circuit(inactivity_s=6.0)
+                    reason = collector.should_trip_circuit(inactivity_s=settings.cdp_inactivity_s)
                     if reason:
                         log_event("circuit_trip", context="search_all", reason=reason, page=page_idx)
                         try:
@@ -675,7 +692,11 @@ def collect_search_all(
                             )
                         except Exception:
                             pass
-                        raise RuntimeError(f"Circuit breaker tripped (Search all p={page_idx}): {reason}")
+                        if settings.cdp_circuit_enabled:
+                            raise RuntimeError(f"Circuit breaker tripped (Search all p={page_idx}): {reason}")
+                        else:
+                            logger.warning(f"Circuit signal ignored (soft mode): {reason}")
+                            break
             time.sleep(max(0.0, pause_s))
 
             after = len(collector._items)
@@ -808,7 +829,7 @@ def collect_pdp_batch(
                 while time.time() - t0 < timeout_s:
                     time.sleep(0.25)
                     if (time.time() - t0) > 3.0:
-                        reason = collector.should_trip_circuit(inactivity_s=6.0)
+                        reason = collector.should_trip_circuit(inactivity_s=settings.cdp_inactivity_s)
                         if reason:
                             log_event("circuit_trip", context="pdp_batch", reason=reason, index=i)
                             try:
@@ -819,7 +840,11 @@ def collect_pdp_batch(
                                 )
                             except Exception:
                                 pass
-                            raise RuntimeError(f"Circuit breaker tripped (PDP batch): {reason}")
+                            if settings.cdp_circuit_enabled:
+                                raise RuntimeError(f"Circuit breaker tripped (PDP batch): {reason}")
+                            else:
+                                logger.warning(f"Circuit signal ignored (soft mode): {reason}")
+                                break
                 time.sleep(max(0.0, pause_s))
                 if on_progress:
                     on_progress("done", {"index": i, "total": total, "url": u})
@@ -915,7 +940,9 @@ def collect_pdp_batch_concurrent(
         try:
             configure_json_logging()
             collector = CdpCollector(port=port, filters=filters)
-            for _ in range(min(concurrency, len(chunk_urls))):
+            # Safety cap on concurrent tabs to avoid Chrome/pychrome instability
+            tabs_count = min(concurrency, len(chunk_urls), int(settings.cdp_max_concurrency))
+            for _ in range(tabs_count):
                 tabs.append(collector.new_tab())
             total = len(chunk_urls)
             session_t0 = time.time()
@@ -949,11 +976,14 @@ def collect_pdp_batch_concurrent(
                     except Exception as e:
                         logger.warning(f"Failed to navigate tab {j+1} to {u}: {e}")
                     time.sleep(max(0.0, stagger_s))
+                # Wait enough for the last dispatched tab to have ~timeout_s to work
+                dispatch_span = max(0.0, (len(batch) - 1) * max(0.0, stagger_s))
+                wait_target = timeout_s + dispatch_span + 0.5
                 t0 = time.time()
-                while time.time() - t0 < timeout_s:
+                while time.time() - t0 < wait_target:
                     time.sleep(0.25)
                     if (time.time() - t0) > 3.0:
-                        reason = collector.should_trip_circuit(inactivity_s=6.0)
+                        reason = collector.should_trip_circuit(inactivity_s=settings.cdp_inactivity_s)
                         if reason:
                             log_event(
                                 "circuit_trip",
@@ -969,7 +999,11 @@ def collect_pdp_batch_concurrent(
                                 )
                             except Exception:
                                 pass
-                            raise RuntimeError(f"Circuit breaker tripped (PDP concurrent): {reason}")
+                            if settings.cdp_circuit_enabled:
+                                raise RuntimeError(f"Circuit breaker tripped (PDP concurrent): {reason}")
+                            else:
+                                logger.warning(f"Circuit signal ignored (soft mode): {reason}")
+                                break
                 if on_progress:
                     on_progress(
                         "batch_done",

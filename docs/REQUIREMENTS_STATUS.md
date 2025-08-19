@@ -32,12 +32,14 @@ Este documento acompanha o progresso do projeto com prioridade máxima em proteg
 - Backoff com `tenacity` nos pontos críticos do CDP (navigate/enable/getResponseBody).
 - Cooldown entre chunks ao reciclar sessões CDP.
 - Logs estruturados (JSON) + contadores mínimos em `data/logs/events.jsonl`.
+- CLI de perfis (básico): `profiles list/create/use` com atualização do `.env`.
+- Validação de ambiente (domínio/locale/timezone/proxy/perfil) via `env-validate`.
 
 ### Parcial
 - Alinhamento de locale/UA/timezone (Playwright ok; CDP parcial – revisar UA e headers).
 - Deduplicação: agora global por `(shop_id,item_id)` nas exports (PDP e Busca).
 - Modelagem de dados: Schemas Pydantic aplicados a PDP/Busca.
-- Paginação CDP de busca: captura janela atual; sem rolagem/múltiplas páginas agregadas.
+- Paginação CDP de busca: implementada via parâmetro `page` (múltiplas páginas agregadas); scroll de página ainda opcional.
 - Concorrência: abas concorrentes implementadas; sem scheduler/queue/métricas estruturadas.
 
 ### Backlog Priorizado (necessidade → menor; em cada nível: menor esforço → maior)
@@ -45,9 +47,8 @@ Este documento acompanha o progresso do projeto com prioridade máxima em proteg
 Nível 1 — Essenciais (Alta necessidade)
 - (sem itens pendentes nesta seção)
 
-Nível 2 — Importantes (Média necessidade)
-- CLI de perfis (impacto: médio, esforço: baixo): comandos `profiles create/list/use` e validações de ambiente.
-- Paginação/scroll em CDP Busca (impacto: médio, esforço: médio): agregar múltiplas páginas antes do export.
+ Nível 2 — Importantes (Média necessidade)
+- (parcial) Paginação/scroll em CDP Busca: paginação via `page` concluída; scroll opcional para variantes de UX.
 - (concluído) Schemas Pydantic + dedup global `(shop_id,item_id)`.
 - Mapeamento domínio↔região/IP (impacto: médio, esforço: baixo): validação de coerência de geo/idioma/timezone antes de rodadas.
 - Proxy sticky avançado (impacto: médio, esforço: médio‑alto): suporte a extensão de autenticação/allowlist e session tag no username.
@@ -60,8 +61,8 @@ Nível 3 — Oportunidade (Baixa necessidade)
 
 ## Mapa por Fase (Plano de Arquitetura)
 - Fase 1 (MVP): concluída.
-- Fase 2 (Produto/Modelo): parcial — normalização básica, falta Schemas e dedup formal.
-- Fase 3 (Resiliência): avançando — rate limiting, health-check ampliado com disjuntor e backoff; faltam métricas estruturadas.
+- Fase 2 (Produto/Modelo): parcial — Schemas Pydantic e dedup prontos; falta paginação/scroll em busca/categoria.
+- Fase 3 (Resiliência): avançando — rate limiting, health-check + disjuntor, backoff e logs JSON mínimos; faltam métricas estruturadas.
 - Fase 4 (Perfis/Proxies): parcial — perfis isolados por `PROFILE_NAME` e `--proxy-server` básico; falta gestão de perfis via CLI e sticky avançado.
 - Fase 5 (CAPTCHA/OTP): pendente — somente manual.
 - Fase 6/7 (Escala/Orquestração CDP): parcial — concorrência por abas e reciclagem básica; falta scheduler/queue e métricas.
@@ -108,10 +109,8 @@ Nível 3 — Oportunidade (Baixa necessidade)
   - Sinais de sucesso: estabilidade após longos lotes; queda de bloqueios tardios.
 
 ### Média Prioridade
-- Schemas Pydantic + Dedup
-  - `SearchItem`, `PdpItem`; validação e normalização; dedup global `(shop_id,item_id)` na export.
-- Logs & Métricas
-  - `loguru` em JSON; contadores: sucesso/bloqueio/latência/bans/hora por perfil/IP.
+- Métricas estruturadas
+  - Agregações e painéis (além do JSONL), contadores consolidados por perfil/IP e janelas de tempo.
 - Paginação CDP (Busca)
   - Simular scroll/troca de página e agregar múltiplas respostas antes do export.
 - Coerência de fingerprint (CDP)
@@ -143,6 +142,8 @@ Nível 3 — Oportunidade (Baixa necessidade)
 - [x] Reciclagem por N páginas (CDP, quando `--launch`)
 - [x] Logs JSON + métricas
 - [x] Schemas Pydantic + dedup global
+- [x] Paginação CDP (Busca) via parâmetro `page`
+- [x] CLI de perfis (list/create/use) + validação de ambiente
 - [ ] Paginação CDP (Busca)
 - [ ] Banco (SQLite/Postgres) com upsert
 - [ ] CAPTCHA/OTP providers
@@ -155,9 +156,10 @@ Infra de qualidade
 ---
 
 Sugestão de próxima sprint (proteção de contas):
-1) Proxy por perfil (CDP) + múltiplos perfis isolados.
-2) Health-check com disjuntor + rate limiting/backoff.
-3) Reciclagem de instância após N páginas.
+1) Paginação/scroll em CDP de busca para consolidar múltiplas páginas.
+2) CLI de perfis + validações de ambiente (perfil/proxy/domínio).
+3) Mapeamento domínio↔região/IP e validação de coerência antes de lotes.
+4) Métricas estruturadas (agregações/painel simples) sobre os logs JSON.
 
 ## Como começar a implementar (atalhos)
 - Código relevante:

@@ -54,6 +54,10 @@ CDP_FILTER_PATTERNS=
 Comandos principais:
 ```bash
 python cli.py --help
+python cli.py env-validate             # valida perfil/proxy/domínio/locale/timezone
+python cli.py profiles list            # lista perfis disponíveis e o ativo
+python cli.py profiles create br_01    # cria diretório do perfil
+python cli.py profiles use br_01       # define PROFILE_NAME no .env
 python cli.py login
 python cli.py cdp-login  # login em Chrome real (perfil CDP)
 python cli.py search --keyword "fones bluetooth"
@@ -69,6 +73,8 @@ python cli.py cdp-export data/cdp_pdp_1755508732.jsonl
 # Captura via CDP (Busca/Listagem):
 python cli.py cdp-search --keyword "brinquedo para cachorro" --timeout 25  # captura + exporta (lança Chrome por padrão)
 python cli.py cdp-search --keyword "brinquedo para cachorro" --no-launch --no-export  # só captura, anexando a Chrome já aberto
+python cli.py cdp-search --keyword "brinquedo para cachorro" -p 5 --timeout 12  # paginação: 5 páginas (page=0..4)
+python cli.py cdp-search --keyword "brinquedo para cachorro" -p 3 --start-page 2  # começa da página 2 (2..4)
 
 # Enriquecer export de busca com dados reais de PDP (lote):
 python cli.py cdp-enrich-search  --launch  # usa o export mais recente e roda PDP em lote
@@ -88,6 +94,7 @@ Notas:
     - Inatividade de rede prolongada sem respostas relevantes.
   - Rate limiting: navegações via CDP são limitadas por `REQUESTS_PER_MINUTE`.
   - Reciclagem: se `PAGES_PER_SESSION` > 0 e `--launch` estiver ativo, lotes longos são divididos em sessões menores (Chrome relançado entre chunks) e os JSONLs são concatenados. Há um cooldown aleatório curto (2–5s) entre sessões para reduzir padrões de reconexão.
+  - Perfis: use `python cli.py profiles use <nome>` para fixar `PROFILE_NAME` no `.env` e isolar cookies/cache por conta. Valide o ambiente com `python cli.py env-validate`.
 
 ## Proteções recentes (CDP)
 - Disjuntor: aborta cedo ao detectar CAPTCHA/login/inatividade/403-429 e marca sessão como degradada.
